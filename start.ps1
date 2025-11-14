@@ -4,8 +4,8 @@ param(
     [string]$Symbol = 'ETH/USDC:USDC',
     [string]$Timeframe = '15m',
     [int]$LookbackDays = 60,
-    [ValidateSet('elliott','momentum','ema_macd')]
-    [string]$Strategy = 'elliott',
+    [ValidateSet('momentum','ema_macd')]
+    [string]$Strategy = 'momentum',
     [switch]$NoPaper
 )
 

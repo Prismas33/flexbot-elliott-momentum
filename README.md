@@ -81,14 +81,14 @@ streamlit run dashboard.py
 ```
 
 - Escolha par/timeframe/lookback na barra lateral e clique em "Executar backtest".
-- Use o seletor "Estratégia" para alternar entre **Elliott**, **Momentum** ou **EMA + MACD (5/21 & 26-55-9)** e comparar os resultados.
+- Use o seletor "Estratégia" para alternar entre **Momentum** ou **EMA + MACD (5/21 & 26-55-9)** e comparar os resultados.
 - A UI mostra métricas resumidas, gráfico do PnL cumulativo e uma tabela com cada trade para inspeção/exportação.
 - Este backtest usa dados históricos até o momento da execução; não é streaming em tempo real.
 - A aba **Tempo real** lê arquivos `.flexbot_state/runtime.json` e `.flexbot_state/latest_backtest.json` que o bot atualiza automaticamente. Para vê-la viva, deixe `main_loop()` rodando (por exemplo: `.\start.ps1 -Action live`) enquanto o dashboard está aberto e clique em "Atualizar dados agora" quando quiser sincronizar.
 - Sempre que alterar par/timeframe/lookback, clique novamente em "Executar backtest" para recalcular os gráficos com os novos parâmetros (o Streamlit reroda o app a cada interação).
 - Os backtests agora paginam os candles até ~5000 candles por timeframe. Se pedir janelas maiores (ex.: 5m por 180 dias) o sistema fará múltiplas requisições até preencher esse limite e mostrará na UI quantas velas conseguiu carregar.
 - Para manter as simulações alinhadas com uma banca pequena, os backtests utilizam capital inicial fixo de **$100** e arriscam **10% ($10)** por trade ao dimensionar as posições.
-- Todas as estratégias respeitam **RR mínimo de 3:1** (recompensa ≥ 3x o risco). Para **Elliott**, só entram setups cujo alvo 1.618 já entregue ≥3R. Nas estratégias Momentum e EMA+MACD os multiplicadores de ATR foram calibrados (stop 1.5× / TP 4.5× e stop 1.8× / TP 5.4×) para que o alvo natural já seja ≥3R — se nem assim chegar em 3R, o trade é descartado.
+- Todas as estratégias respeitam **RR mínimo de 3:1** (recompensa ≥ 3x o risco). Nas estratégias Momentum e EMA+MACD os multiplicadores de ATR foram calibrados (stop 1.5× / TP 4.5× e stop 1.8× / TP 5.4×) para que o alvo natural já seja ≥3R — se nem assim chegar em 3R, o trade é descartado.
 - O sizing do backtest usa banca inicial de **$100** e recalcula a cada trade: sempre 10% do capital corrente é arriscado (ex.: se a curva estiver em $124, o risco passa a $12.40 e o alvo padrão fica $37.20).
 - Antes de abrir qualquer compra, exigimos uma **divergência bullish simples de RSI** (último fundo do RSI mais alto enquanto o preço faz um fundo mais baixo). O filtro é aplicado a todas as estratégias e usa o mesmo timeframe do sinal.
 

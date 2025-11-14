@@ -27,13 +27,12 @@ with st.sidebar:
     lookback_days = st.slider("Lookback (dias)", min_value=30, max_value=180, value=60, step=5)
     def strategy_label(key: str) -> str:
         mapping = {
-            "elliott": "Elliott",
             "momentum": "Momentum",
             "ema_macd": "EMA + MACD",
         }
         return mapping.get(key, key)
 
-    strategy = st.selectbox("Estratégia", options=["elliott","momentum","ema_macd"], format_func=strategy_label, index=0)
+    strategy = st.selectbox("Estratégia", options=["momentum","ema_macd"], format_func=strategy_label, index=0)
     run_button = st.button("▶️ Executar backtest", use_container_width=True)
     st.markdown("---")
     st.caption("Para métricas em tempo real, mantenha `main_loop()` rodando (ex.: `start.ps1 -Action live`).")
