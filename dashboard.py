@@ -17,6 +17,168 @@ from elliott_momentum_breakout_bot import (
 from state_store import read_user_config, update_user_config
 
 st.set_page_config(page_title="FlexBot Dashboard", layout="wide")
+
+CUSTOM_CSS = """
+<style>
+:root {
+    --flexbot-accent: #7c6cf3;
+    --flexbot-accent-soft: rgba(124, 108, 243, 0.12);
+    --flexbot-bg-card: rgba(22, 27, 38, 0.92);
+}
+.stApp > header {
+    background: linear-gradient(135deg, rgba(16, 20, 30, 0.92), rgba(16, 22, 36, 0.72));
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.stApp main .block-container {
+    padding-top: 1.5rem;
+    background: radial-gradient(circle at 20% 20%, rgba(111, 94, 255, 0.08), transparent 35%),
+                radial-gradient(circle at 80% 0%, rgba(94, 210, 255, 0.05), transparent 40%),
+                linear-gradient(160deg, #0f1423 0%, #141b2d 40%, #0d101d 100%);
+}
+section[data-testid="stSidebar"] {
+    background: #101521;
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
+}
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.2rem;
+}
+.metric-card {
+    background: var(--flexbot-bg-card);
+    padding: 1.05rem 1.1rem;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    box-shadow: inset 0 0 0 1px rgba(124, 108, 243, 0.05);
+}
+.metric-card .label {
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #9aa0b3;
+}
+.metric-card .value {
+    margin-top: 0.35rem;
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: #f5f6f8;
+}
+.metric-card .context {
+    margin-top: 0.45rem;
+    font-size: 0.82rem;
+    color: #6d7380;
+}
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.75rem;
+    border-radius: 999px;
+    background: rgba(124, 108, 243, 0.18);
+    color: #c7c3fb;
+    font-size: 0.8rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.status-pill.live {
+    background: rgba(16, 199, 151, 0.18);
+    color: #57efc9;
+}
+.status-pill.paper {
+    background: rgba(124, 108, 243, 0.18);
+    color: #c7c3fb;
+}
+.status-pill.slim {
+    background: rgba(120, 129, 255, 0.12);
+    color: #9ea7ff;
+}
+.hero-card {
+    margin-bottom: 1.4rem;
+    padding: 1.25rem 1.5rem;
+    border-radius: 16px;
+    background: linear-gradient(135deg, rgba(24, 34, 61, 0.9), rgba(18, 22, 33, 0.78));
+    box-shadow: 0 20px 36px rgba(10, 12, 20, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+.hero-title {
+    font-size: 1.3rem;
+    font-weight: 600;
+    color: #f3f4fa;
+}
+.hero-meta {
+    margin-top: 0.35rem;
+    color: #8791a9;
+    font-size: 0.9rem;
+}
+.hero-badges {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    align-items: center;
+}
+.stTabs [data-baseweb="tab-list"] {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.stTabs [data-baseweb="tab"] {
+    background: transparent;
+    color: #aab2c8;
+    font-weight: 500;
+}
+.stTabs [data-baseweb="tab"]:hover {
+    color: #ffffff;
+}
+.stTabs [aria-selected="true"] {
+    color: #ffffff !important;
+    border-bottom: 2px solid var(--flexbot-accent) !important;
+}
+.stButton>button,
+.stDownloadButton>button {
+    border-radius: 10px;
+    border: none;
+    padding: 0.6rem 1.1rem;
+    background: linear-gradient(135deg, #7c6cf3, #5d8af0);
+    color: white;
+    font-weight: 600;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.stButton>button:hover,
+.stDownloadButton>button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 12px 22px rgba(94, 115, 245, 0.25);
+}
+.stSlider>div>div>div>div {
+    background: linear-gradient(135deg, rgba(124,108,243,0.6), rgba(93,138,240,0.6));
+}
+.card-section {
+    padding: 1.1rem 1.3rem;
+    border-radius: 16px;
+    background: rgba(17, 25, 40, 0.76);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    box-shadow: 0 14px 30px rgba(10, 12, 20, 0.25);
+    margin-bottom: 1.4rem;
+}
+.card-section h3 {
+    margin-bottom: 0.8rem;
+}
+.stDataFrame thead tr th {
+    background: rgba(24, 29, 45, 0.92);
+    color: #cbd3f5;
+}
+.stDataFrame tbody tr {
+    background: rgba(12, 16, 28, 0.68);
+}
+.stDataFrame tbody tr:hover {
+    background: rgba(39, 45, 68, 0.8) !important;
+}
+</style>
+"""
+
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.title("📈 FlexBot Dashboard")
 st.caption("Visualize resultados de backtests e acompanhe métricas do loop live.")
 
@@ -58,26 +220,46 @@ with st.sidebar:
     symbol = st.selectbox("Par", options=pairs, index=0)
     timeframe = st.selectbox("Timeframe", options=timeframes, index=1)
     lookback_days = st.slider("Lookback (dias)", min_value=30, max_value=180, value=60, step=5)
-    def strategy_label(key: str) -> str:
-        mapping = {
-            "momentum": "Momentum",
-            "ema_macd": "EMA + MACD",
-        }
-        return mapping.get(key, key)
-
-    strategy = st.selectbox("Estratégia", options=["momentum","ema_macd"], format_func=strategy_label, index=0)
+    strategy = "ema_macd"
+    strategy_display = "EMA + MACD"
+    st.selectbox("Estratégia", options=[strategy_display], index=0, disabled=True)
     bias_label = {
         "long": "Comprado",
         "short": "Vendido",
         "both": "Ambos",
     }
-    trade_bias = st.selectbox("Direção", options=["long", "short", "both"], format_func=lambda k: bias_label.get(k, k), index=0)
-    cross_lookback = st.slider("Velas para cruzamento EMA/MACD", min_value=2, max_value=30, value=8, step=1)
+    bias_options = ["long", "short", "both"]
+    default_bias = config_data.get("trade_bias")
+    if default_bias not in bias_options:
+        default_bias = "long"
+    trade_bias = st.selectbox(
+        "Direção",
+        options=bias_options,
+        format_func=lambda k: bias_label.get(k, k),
+        index=bias_options.index(default_bias),
+    )
+    default_cross = config_data.get("ema_cross_lookback", 8)
+    if not isinstance(default_cross, int) or default_cross < 2 or default_cross > 30:
+        default_cross = 8
+    cross_lookback = st.slider("Velas para cruzamento EMA/MACD", min_value=2, max_value=30, value=default_cross, step=1)
+    require_default = config_data.get("ema_require_divergence")
+    if not isinstance(require_default, bool):
+        require_default = True
     require_divergence = st.checkbox(
         "Exigir divergência RSI (EMA+MACD)",
-        value=True,
+        value=require_default,
         help="Quando desmarcado, a confirmação EMA+MACD aceita sinais sem divergência RSI.",
     )
+    if (
+        config_data.get("trade_bias") != trade_bias
+        or config_data.get("ema_cross_lookback") != cross_lookback
+        or config_data.get("ema_require_divergence") != require_divergence
+    ):
+        update_user_config(
+            trade_bias=trade_bias,
+            ema_cross_lookback=cross_lookback,
+            ema_require_divergence=require_divergence,
+        )
     if "pair_validation" not in st.session_state:
         st.session_state["pair_validation"] = None
     pair_to_validate = st.text_input("Validar par disponível na corretora", value=symbol)
@@ -97,6 +279,22 @@ with st.sidebar:
     run_button = st.button("▶️ Executar backtest", use_container_width=True)
     st.markdown("---")
     st.caption("Para métricas em tempo real, mantenha `main_loop()` rodando (ex.: `start.ps1 -Action live`).")
+
+divergence_badge = "On" if require_divergence else "Off"
+summary_html = f"""
+<div class='hero-card'>
+    <div>
+        <div class='hero-title'>{symbol}</div>
+        <div class='hero-meta'>{timeframe} · Lookback {lookback_days} dias · Cross {cross_lookback} velas</div>
+    </div>
+    <div class='hero-badges'>
+        <span class='status-pill {env_choice}'>{env_labels.get(env_choice, env_choice.title())}</span>
+        <span class='status-pill slim'>Divergência {divergence_badge}</span>
+        <span class='status-pill slim'>Bias {bias_label.get(trade_bias, trade_bias)}</span>
+    </div>
+</div>
+"""
+st.markdown(summary_html, unsafe_allow_html=True)
 
 @st.cache_data(show_spinner=False)
 def run_backtest(symbol: str, timeframe: str, lookback_days: int, strategy: str, bias: str, cross_lookback: int, require_divergence: bool):
@@ -122,7 +320,7 @@ backtest_tab, realtime_tab = st.tabs(["Backtest", "Tempo real"])
 with backtest_tab:
     if run_button:
         with st.spinner(
-            f"Gerando backtest {symbol} {timeframe} (últimos {lookback_days} dias) — estratégia {strategy} | bias {trade_bias} | cross {cross_lookback} velas | divergência {'obrigatória' if require_divergence else 'opcional'}..."
+            f"Gerando backtest {symbol} {timeframe} (últimos {lookback_days} dias) — estratégia {strategy_display} | bias {bias_label.get(trade_bias, trade_bias)} | cross {cross_lookback} velas | divergência {'obrigatória' if require_divergence else 'opcional'}..."
         ):
             df, coverage = run_backtest(symbol, timeframe, lookback_days, strategy, trade_bias, cross_lookback, require_divergence)
         if df is None or df.empty:
@@ -139,24 +337,35 @@ with backtest_tab:
             total_pnl = df["pnl"].sum()
 
             st.subheader("Métricas")
-            cols = st.columns(4)
-            cols[0].metric("Trades", total_trades)
-            cols[1].metric("Winrate", f"{winrate:.1f}%")
-            cols[2].metric("Média Gain", f"${avg_win:.2f}")
-            cols[3].metric("Média Loss", f"${avg_loss:.2f}")
-            st.metric("PNL total", f"${total_pnl:.2f}")
+            cards = [
+                ("Trades", f"{total_trades}", f"{len(wins)} vit · {len(losses)} der · {len(breakevens)} be"),
+                ("Winrate", f"{winrate:.1f}%", "com base em resultados líquidos" if eligible else "sem trades contabilizados"),
+                ("PNL total", f"${total_pnl:.2f}", f"Capital inicial ${simulation_base_capital:.0f}"),
+                ("Média Gain", f"${avg_win:.2f}", "por trade vencedor"),
+                ("Média Loss", f"${avg_loss:.2f}", "por trade perdedor"),
+            ]
+            cards_html = "".join(
+                f"<div class='metric-card'><div class='label'>{label}</div><div class='value'>{value}</div><div class='context'>{context}</div></div>"
+                for label, value, context in cards
+            )
+            st.markdown(f"<div class='metric-grid'>{cards_html}</div>", unsafe_allow_html=True)
             st.caption(
-                f"Simulação: capital inicial ${simulation_base_capital:.0f} | risco {simulation_risk_per_trade*100:.0f}% por trade | bias {bias_label.get(trade_bias, trade_bias)} | cross lookback {cross_lookback} velas | divergência {'obrigatória' if require_divergence else 'opcional'} | vitórias {len(wins)} | derrotas {len(losses)} | breakeven {len(breakevens)}"
+                f"Simulação: capital inicial ${simulation_base_capital:.0f} | risco {simulation_risk_per_trade*100:.0f}% por trade | estratégia {strategy_display} | bias {bias_label.get(trade_bias, trade_bias)} | cross lookback {cross_lookback} velas | divergência {'obrigatória' if require_divergence else 'opcional'} | vitórias {len(wins)} | derrotas {len(losses)} | breakeven {len(breakevens)}"
             )
 
             st.subheader("Evolução do PnL cumulativo")
+            st.markdown("<div class='card-section'>", unsafe_allow_html=True)
             st.line_chart(df.set_index("timestamp")["cum_pnl"], use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
             st.subheader("Trades detalhados")
+            st.markdown("<div class='card-section'>", unsafe_allow_html=True)
             st.dataframe(df, use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
             if coverage:
                 st.caption("Velas carregadas por timeframe")
+                st.markdown("<div class='card-section'>", unsafe_allow_html=True)
                 cov_rows = []
                 for tf, cov in coverage.items():
                     if isinstance(cov, dict):
@@ -177,6 +386,7 @@ with backtest_tab:
                         })
                 cov_df = pd.DataFrame(cov_rows)
                 st.dataframe(cov_df, use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
 
             csv = df.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Exportar CSV", csv, file_name=f"backtest_{symbol.replace('/', '_')}_{timeframe}.csv", mime="text/csv")
@@ -203,14 +413,18 @@ with realtime_tab:
         st.write(f"Última atualização: {runtime.get('last_update', '—')}")
         if runtime.get("open_positions"):
             st.markdown("**Posições abertas**")
+            st.markdown("<div class='card-section'>", unsafe_allow_html=True)
             st.dataframe(pd.DataFrame(runtime["open_positions"]), use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
         else:
             st.info("Sem posições abertas no momento.")
 
         iteration = runtime.get("iteration") or []
         if iteration:
             st.markdown("**Resumo da última iteração**")
+            st.markdown("<div class='card-section'>", unsafe_allow_html=True)
             st.dataframe(pd.DataFrame(iteration), use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("---")
     st.subheader("Último backtest salvo pelo bot")
@@ -247,7 +461,11 @@ with realtime_tab:
                         "Solicitado": None,
                     })
             cov_df = pd.DataFrame(cov_rows)
+            st.markdown("<div class='card-section'>", unsafe_allow_html=True)
             st.dataframe(cov_df, use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
         trades = bt.get("trades") or []
         if trades:
+            st.markdown("<div class='card-section'>", unsafe_allow_html=True)
             st.dataframe(pd.DataFrame(trades), use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)

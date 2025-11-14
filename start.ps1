@@ -79,6 +79,5 @@ $cmd += " --log-level $LogLevel"
 if ($NoPaper) {
     $cmd += " --no-paper"
 }
-
 Write-Host "Running: $cmd"
 Invoke-Expression $cmd

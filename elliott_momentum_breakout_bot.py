@@ -135,6 +135,18 @@ if environment_mode not in ("paper", "live"):
     environment_mode = "paper"
 paper = environment_mode != "live"
 
+config_trade_bias = user_config.get("trade_bias")
+if isinstance(config_trade_bias, str) and config_trade_bias in ("long", "short", "both"):
+    trade_bias = config_trade_bias
+
+config_cross_lb = user_config.get("ema_cross_lookback")
+if isinstance(config_cross_lb, int) and config_cross_lb > 0:
+    ema_macd_cross_lookback = config_cross_lb
+
+config_require_div = user_config.get("ema_require_divergence")
+if isinstance(config_require_div, bool):
+    ema_macd_require_divergence = config_require_div
+
 # ----------------------------------------
 
 # logging
@@ -1444,6 +1456,13 @@ if __name__ == "__main__":
     ema_macd_require_divergence = args.require_divergence
     logging.info("EMA/MACD exige divergência RSI: %s", "sim" if ema_macd_require_divergence else "não")
 
+    update_user_config(
+        environment=environment_mode,
+        trade_bias=trade_bias,
+        ema_cross_lookback=ema_macd_cross_lookback,
+        ema_require_divergence=ema_macd_require_divergence,
+    )
+
     if args.live:
         logging.info("Running live main loop for symbol=%s", args.symbol)
         # user should set API keys
@@ -1475,6 +1494,7 @@ if __name__ == "__main__":
                     "risk_per_trade": simulation_risk_per_trade,
                     "ema_cross_lookback": ema_macd_cross_lookback,
                     "ema_require_divergence": ema_macd_require_divergence,
+                    "trade_bias": trade_bias,
                     "environment": environment_mode,
                 }
             )

@@ -101,6 +101,7 @@ streamlit run dashboard.py
 - Escolha par/timeframe/lookback na barra lateral e clique em "Executar backtest".
 - Use os seletores "Estratégia", "Direção" e "Velas para cruzamento EMA/MACD" para alternar entre **Momentum** ou **EMA + MACD (5/21 & 26-55-9)**, escolher o bias e definir quão recentes os cruzamentos precisam ser (por defeito 8 velas).
 - O seletor "Ambiente" na barra lateral alterna entre **Teste (paper)** e **Produção (live)**, gravando a preferência em `.flexbot_state/config.json`. O script principal lê essa configuração automaticamente (pode ser sobrescrita com `--paper-mode` ou `--no-paper`).
+ - O seletor "Ambiente" na barra lateral alterna entre **Teste (paper)** e **Produção (live)**, gravando a preferência em `.flexbot_state/config.json`. O script principal lê essa configuração automaticamente (pode ser sobrescrita com `--paper-mode` ou `--no-paper`).
 - O botão "Consultar saldo" consulta o saldo estimado através da API (usa as credenciais configuradas) e a caixa "Validar par" verifica se o instrumento existe na corretora antes de rodar backtests/live.
 - O checkbox "Exigir divergência RSI (EMA+MACD)" controla se a confirmação EMA+MACD só aceita setups com divergência; deixe marcado para o comportamento padrão ou desmarque para testar sinais sem esse filtro.
 - Quando quiser debugar sinais (especialmente shorts), rode com `-LogLevel DEBUG` (ou `--log-level DEBUG` no script Python) para ver os detalhes de rejeição nas regras.
