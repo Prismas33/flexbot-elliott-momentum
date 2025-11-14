@@ -17,6 +17,7 @@ Nota: testa em paper e faz backtests antes de usar capital real.
 """
 
 import os
+import sys
 import ccxt
 import argparse
 import time
@@ -31,7 +32,12 @@ from dotenv import load_dotenv
 from strategies.ema_macd_long import ema_macd_confirm_long
 from strategies.ema_macd_short import ema_macd_confirm_short
 
-from state_store import write_runtime_state, write_backtest_summary
+from state_store import (
+    write_runtime_state,
+    write_backtest_summary,
+    read_user_config,
+    update_user_config,
+)
 
 # Dependency check — helpful message if a module is missing
 try:
@@ -94,6 +100,7 @@ ema_macd_min_tf_agree = 1
 ema_macd_stop_atr = 1.8
 ema_macd_tp_atr = 5.4  # garante 3R natural (tp/stop = 3)
 ema_macd_cross_lookback = 8
+ema_macd_require_divergence = True
 # trend filter
 trend_fast_span = 20
 trend_slow_span = 50
@@ -114,13 +121,19 @@ take_partial_rr = 1.5           # realizar parcial a ~1.5R
 break_even_rr = 1.0             # mover SL para BE a 1R
 # backtest params
 backtest_min_hold_candles = 3
-max_backtest_candles_per_tf = 5000
+max_backtest_candles_per_tf = 20000
 
 # bias override thresholds e gestão de risco
 momentum_bias_override_score = 3
 ema_macd_bias_override_score = 3
 loss_streak_limit = 2
 loss_streak_risk_factor = 0.5
+
+user_config = read_user_config()
+environment_mode = user_config.get("environment", "paper")
+if environment_mode not in ("paper", "live"):
+    environment_mode = "paper"
+paper = environment_mode != "live"
 
 # ----------------------------------------
 
@@ -195,7 +208,21 @@ def fetch_ohlcv_paginated(symbol, timeframe, bars_needed):
 def fetch_backtest_series(symbol, timeframe, candles_needed):
     candles_needed = min(candles_needed, max_backtest_candles_per_tf)
     df = fetch_ohlcv_paginated(symbol, timeframe, candles_needed)
-    return df, (len(df) if df is not None else 0)
+    if df is None or df.empty:
+        return None, {
+            "candles": 0,
+            "start": None,
+            "end": None,
+            "requested": candles_needed,
+        }
+    start_ts = df.index[0]
+    end_ts = df.index[-1]
+    return df, {
+        "candles": len(df),
+        "start": start_ts.isoformat(),
+        "end": end_ts.isoformat(),
+        "requested": candles_needed,
+    }
 
 def timeframe_to_minutes(tf):
     if tf in tf_minutes_map:
@@ -294,8 +321,9 @@ def momentum_confirm(df):
         "rsi_ok": rsi_ok,
     }
 
-def ema_macd_confirm(df, cross_lookback=None):
+def ema_macd_confirm(df, cross_lookback=None, require_divergence=None):
     cross_lb = cross_lookback if cross_lookback is not None else ema_macd_cross_lookback
+    divergence_required = ema_macd_require_divergence if require_divergence is None else require_divergence
     return ema_macd_confirm_long(
         df,
         ema_fast_period=ema_fast_period,
@@ -310,6 +338,7 @@ def ema_macd_confirm(df, cross_lookback=None):
         compute_macd=compute_macd,
         has_bullish_rsi_divergence=has_bullish_rsi_divergence,
         cross_lookback=cross_lb,
+        require_divergence=divergence_required,
     )
 
 # ---------- Position sizing ----------
@@ -324,6 +353,21 @@ def fetch_account_balance():
     except Exception as e:
         logging.warning("fetch_balance falhou: %s", e)
     return account_balance_fallback
+
+
+def get_environment_mode():
+    return "paper" if paper else "live"
+
+
+def validate_symbol(symbol):
+    try:
+        markets = exchange.markets or {}
+        if not markets:
+            markets = exchange.load_markets()
+        return symbol in markets
+    except Exception as exc:
+        logging.error("Falha ao validar par %s: %s", symbol, exc)
+        return False
 
 def compute_size(account_balance, entry_price, stop_price, risk_per_trade=default_risk_per_trade):
     risk_amount = account_balance * risk_per_trade
@@ -754,7 +798,11 @@ def analyze_ema_macd_and_maybe_trade(symbol):
             continue
 
         if trade_bias in ("long", "both"):
-            confirmed_long, details_long = ema_macd_confirm(df, cross_lookback=ema_macd_cross_lookback)
+            confirmed_long, details_long = ema_macd_confirm(
+                df,
+                cross_lookback=ema_macd_cross_lookback,
+                require_divergence=ema_macd_require_divergence,
+            )
             long_info = {
                 "confirmed": confirmed_long,
                 "details": details_long,
@@ -784,7 +832,15 @@ def analyze_ema_macd_and_maybe_trade(symbol):
                 compute_macd=compute_macd,
                 has_bearish_rsi_divergence=has_bearish_rsi_divergence,
                 cross_lookback=ema_macd_cross_lookback,
+                require_divergence=ema_macd_require_divergence,
             )
+            if not confirmed_short and logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(
+                    "EMA+MACD short rejeitado (live) %s %s — detalhes: %s",
+                    symbol,
+                    tf,
+                    details_short,
+                )
             short_info = {
                 "confirmed": confirmed_short,
                 "details": details_short,
@@ -1039,10 +1095,12 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
             pnl_total = entry_ref_price - final_price
     return {"exit_price": final_price, "exit_idx": n-1, "outcome": "none", "pnl": pnl_total}
 
-def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None, cross_lookback=None):
+def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None, cross_lookback=None, require_divergence=None):
     strategy = strategy or strategy_mode
     effective_bias = bias or trade_bias
     cross_lb = cross_lookback if cross_lookback is not None else ema_macd_cross_lookback
+    divergence_required = ema_macd_require_divergence if require_divergence is None else require_divergence
+    active_timeframes = [tf for tf in timeframes if tf == timeframe] or [timeframe]
     logging.info("Backtest %s %s last %d days", symbol, timeframe, lookback_days)
     minutes = timeframe_to_minutes(timeframe)
     candles_needed = int((24*60/ minutes) * lookback_days) + 200
@@ -1085,7 +1143,7 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
             if effective_bias == "short":
                 continue
             momentum_ready = []
-            for tf in timeframes:
+            for tf in active_timeframes:
                 slice_df = slices.get(tf)
                 if slice_df is None or len(slice_df) < 50:
                     continue
@@ -1127,11 +1185,15 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
         elif strategy == "ema_macd":
             candidates = []
             if effective_bias in ("long", "both"):
-                for tf in timeframes:
+                for tf in active_timeframes:
                     slice_df = slices.get(tf)
                     if slice_df is None or len(slice_df) < ema_slow_period + 10:
                         continue
-                    confirmed_long, details_long = ema_macd_confirm(slice_df, cross_lookback=cross_lb)
+                    confirmed_long, details_long = ema_macd_confirm(
+                        slice_df,
+                        cross_lookback=cross_lb,
+                        require_divergence=divergence_required,
+                    )
                     if not confirmed_long or not details_long.get("atr"):
                         continue
                     if not bias_allows_long(tf, bias_snapshot) and details_long.get("score", 0) < ema_macd_bias_override_score:
@@ -1158,7 +1220,7 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
                         "details": details_long,
                     })
             if effective_bias in ("short", "both"):
-                for tf in timeframes:
+                for tf in active_timeframes:
                     slice_df = slices.get(tf)
                     if slice_df is None or len(slice_df) < ema_slow_period + 10:
                         continue
@@ -1176,7 +1238,16 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
                         compute_macd=compute_macd,
                         has_bearish_rsi_divergence=has_bearish_rsi_divergence,
                         cross_lookback=cross_lb,
+                        require_divergence=divergence_required,
                     )
+                    if not confirmed_short and logging.getLogger().isEnabledFor(logging.DEBUG):
+                        logging.debug(
+                            "EMA+MACD short rejeitado (bt) %s %s @ %s — detalhes: %s",
+                            symbol,
+                            tf,
+                            ts,
+                            details_short,
+                        )
                     if not confirmed_short or not details_short.get("atr"):
                         continue
                     if not bias_allows_short(tf, bias_snapshot) and details_short.get("score", 0) < ema_macd_bias_override_score:
@@ -1254,6 +1325,12 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
             "risk_multiplier": risk_mult,
             "risk_per_trade": effective_risk,
         }
+        if pnl_value > 1e-8:
+            trade["net_result"] = "win"
+        elif pnl_value < -1e-8:
+            trade["net_result"] = "loss"
+        else:
+            trade["net_result"] = "breakeven"
         results.append(trade)
         current_equity += pnl_value
         if outcome['outcome'] == 'tp' or outcome['pnl'] > 0:
@@ -1267,14 +1344,18 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
         logging.info("Nenhuma operação gerada no backtest.")
         return pd.DataFrame(), coverage_info
     df_trades = pd.DataFrame(results)
-    wins = df_trades[df_trades['outcome']=='tp']
-    losses = df_trades[df_trades['outcome']=='sl']
+    wins = df_trades[df_trades['pnl'] > 0]
+    losses = df_trades[df_trades['pnl'] < 0]
+    breakevens = df_trades[df_trades['pnl'].abs() <= 1e-8]
     total_pnl = df_trades['pnl'].sum()
-    winrate = len(wins) / len(df_trades)
+    eligible = len(wins) + len(losses)
+    winrate = (len(wins) / eligible) if eligible > 0 else 0
     avg_win = wins['pnl'].mean() if len(wins)>0 else 0
     avg_loss = losses['pnl'].mean() if len(losses)>0 else 0
-    logging.info("Backtest summary: trades=%d winrate=%.2f total_pnl=%.4f avg_win=%.4f avg_loss=%.4f",
-                 len(df_trades), winrate, total_pnl, avg_win, avg_loss)
+    logging.info(
+        "Backtest summary: trades=%d winrate=%.2f total_pnl=%.4f avg_win=%.4f avg_loss=%.4f breakevens=%d",
+        len(df_trades), winrate, total_pnl, avg_win, avg_loss, len(breakevens)
+    )
     return df_trades, coverage_info
 
 # ---------- Main loop ----------
@@ -1308,21 +1389,48 @@ if __name__ == "__main__":
     parser.add_argument('--symbol', dest='symbol', default='ETH/USDC:USDC', help='Symbol for backtest or live run')
     parser.add_argument('--timeframe', dest='timeframe', default='15m', help='Timeframe for the backtest (e.g., 15m)')
     parser.add_argument('--lookback-days', dest='lookback_days', type=int, default=60, help='Lookback days for backtest')
-    parser.add_argument('--no-paper', dest='paper', action='store_false', help='Disable paper mode (will execute real orders)')
+    paper_group = parser.add_mutually_exclusive_group()
+    paper_group.add_argument('--paper-mode', dest='paper', action='store_const', const=True, help='Força modo paper (test) mesmo se o config estiver em live')
+    paper_group.add_argument('--no-paper', dest='paper', action='store_const', const=False, help='Disable paper mode (will execute real orders)')
     parser.add_argument('--strategy', choices=['momentum','ema_macd'], default='momentum', help='Seleciona estratégia principal')
     parser.add_argument('--cross-lookback', dest='cross_lookback', type=int, default=ema_macd_cross_lookback, help='Janela (nº de velas) para aceitar cruzamentos EMA/MACD recentes')
     parser.add_argument('--trade-bias', choices=['long','short','both'], default=trade_bias, help='Direção de trade: only long, only short ou ambos')
+    parser.add_argument('--log-level', dest='log_level', default='INFO', help='Nível de logging (DEBUG, INFO, WARNING, ...)')
+    divergence_group = parser.add_mutually_exclusive_group()
+    divergence_group.add_argument('--require-divergence', dest='require_divergence', action='store_true', default=ema_macd_require_divergence, help='Exige divergência RSI para setups EMA+MACD (padrão)')
+    divergence_group.add_argument('--allow-no-divergence', dest='require_divergence', action='store_false', help='Permite setups EMA+MACD mesmo sem divergência RSI')
+    parser.add_argument('--check-symbol', dest='check_symbol', help='Valida se o par existe na corretora e termina imediatamente')
+    parser.set_defaults(paper=None)
     args = parser.parse_args()
 
-    logging.info("Script iniciado. paper=%s", paper)
-    # apply CLI --no-paper to switch execution mode
-    if hasattr(args, 'paper'):
-        # apply CLI --no-paper to switch execution mode
-        paper = args.paper
-        if paper:
-            logging.info("MODO PAPER ATIVO — ordens reais NÃO serão colocadas.")
+    if args.check_symbol:
+        symbol_to_check = args.check_symbol.strip()
+        is_valid = validate_symbol(symbol_to_check)
+        if is_valid:
+            logging.info("Par %s disponível para negociação.", symbol_to_check)
+            print(f"{symbol_to_check}: disponível")
+            sys.exit(0)
         else:
-            logging.warning("MODO REAL: As ordens reais serão enviadas — esteja certo do seu API_KEY/API_SECRET e capital.")
+            logging.error("Par %s não encontrado na corretora %s", symbol_to_check, exchange_id)
+            print(f"{symbol_to_check}: indisponível")
+            sys.exit(1)
+
+    log_level = getattr(logging, str(args.log_level).upper(), logging.INFO)
+    logging.getLogger().setLevel(log_level)
+    logging.info("Log level definido para %s", logging.getLevelName(log_level))
+
+    logging.info("Script iniciado. ambiente configurado=%s (paper=%s)", environment_mode, paper)
+
+    if args.paper is not None:
+        paper = args.paper
+        environment_mode = "paper" if paper else "live"
+        update_user_config(environment=environment_mode)
+        logging.info("Ambiente ajustado via CLI para %s", environment_mode)
+
+    if paper:
+        logging.info("MODO PAPER ATIVO — ordens reais NÃO serão colocadas.")
+    else:
+        logging.warning("MODO REAL: As ordens reais serão enviadas — esteja certo do seu API_KEY/API_SECRET e capital.")
 
     strategy_mode = args.strategy
     logging.info("Estratégia ativa: %s", strategy_mode)
@@ -1332,6 +1440,9 @@ if __name__ == "__main__":
 
     ema_macd_cross_lookback = args.cross_lookback
     logging.info("EMA/MACD cross lookback: %d velas", ema_macd_cross_lookback)
+
+    ema_macd_require_divergence = args.require_divergence
+    logging.info("EMA/MACD exige divergência RSI: %s", "sim" if ema_macd_require_divergence else "não")
 
     if args.live:
         logging.info("Running live main loop for symbol=%s", args.symbol)
@@ -1347,6 +1458,7 @@ if __name__ == "__main__":
                 strategy=args.strategy,
                 bias=trade_bias,
                 cross_lookback=ema_macd_cross_lookback,
+                require_divergence=ema_macd_require_divergence,
             )
             if df_trades is not None and not df_trades.empty:
                 print(df_trades.head())
@@ -1362,6 +1474,8 @@ if __name__ == "__main__":
                     "base_capital": simulation_base_capital,
                     "risk_per_trade": simulation_risk_per_trade,
                     "ema_cross_lookback": ema_macd_cross_lookback,
+                    "ema_require_divergence": ema_macd_require_divergence,
+                    "environment": environment_mode,
                 }
             )
         except Exception as e:

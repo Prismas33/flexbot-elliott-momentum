@@ -17,6 +17,7 @@ def ema_macd_confirm_long(
     compute_macd,
     has_bullish_rsi_divergence,
     cross_lookback: int = 8,
+    require_divergence: bool = True,
 ):
     """Confirma setup de compra para EMA + MACD."""
     if df is None or len(df) < max(ema_slow_period, ema_macd_slow) + 5:
@@ -63,6 +64,7 @@ def ema_macd_confirm_long(
     slope_ok = slope_fast > 0 and slope_slow >= -0.0001
 
     has_divergence = has_bullish_rsi_divergence(working)
+    divergence_ok = has_divergence or not require_divergence
 
     rsi_val = float(working['rsi'].iloc[-1]) if not np.isnan(working['rsi'].iloc[-1]) else None
     rsi_ok = True
@@ -79,7 +81,7 @@ def ema_macd_confirm_long(
         macd_aligned and
         histogram_positive and
         confluence and
-        has_divergence and
+        divergence_ok and
         atr_available and
         slope_ok and
         hist_ok and
@@ -104,6 +106,8 @@ def ema_macd_confirm_long(
         "ema_cross_recent": ema_cross_recent,
         "macd_cross_recent": macd_cross_recent,
         "has_divergence": has_divergence,
+        "require_divergence": require_divergence,
+        "divergence_ok": divergence_ok,
         "score": score,
     }
     if confirmed:

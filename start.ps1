@@ -9,6 +9,10 @@ param(
     [ValidateSet('long','short','both')]
     [string]$TradeBias = 'long',
     [int]$CrossLookback = 8,
+    [string]$CheckSymbol,
+    [switch]$AllowNoDivergence,
+    [ValidateSet('DEBUG','INFO','WARNING','ERROR','CRITICAL')]
+    [string]$LogLevel = 'INFO',
     [switch]$NoPaper
 )
 
@@ -36,6 +40,28 @@ python -m pip install --upgrade pip | Out-Null
 Write-Host "Installing dependencies from requirements.txt..."
 python -m pip install -r requirements.txt
 
+# Quick symbol validation mode
+if ($CheckSymbol) {
+    $cmd = "python .\elliott_momentum_breakout_bot.py --check-symbol '$CheckSymbol'"
+    Write-Host "Running: $cmd"
+    Invoke-Expression $cmd
+    return
+}
+
+# Show environment preference
+$configPath = Join-Path ".flexbot_state" "config.json"
+if (Test-Path $configPath) {
+    try {
+        $cfgRaw = Get-Content $configPath -Raw
+        $cfg = $cfgRaw | ConvertFrom-Json
+        if ($cfg.environment) {
+            Write-Host "Ambiente configurado: $($cfg.environment)"
+        }
+    } catch {
+        Write-Warning "Não foi possível ler .flexbot_state\\config.json"
+    }
+}
+
 # Build command
 $cmd = "python .\elliott_momentum_breakout_bot.py"
 if ($Action -eq 'live') {
@@ -46,6 +72,10 @@ if ($Action -eq 'live') {
 $cmd += " --strategy $Strategy"
 $cmd += " --trade-bias $TradeBias"
 $cmd += " --cross-lookback $CrossLookback"
+if ($AllowNoDivergence) {
+    $cmd += " --allow-no-divergence"
+}
+$cmd += " --log-level $LogLevel"
 if ($NoPaper) {
     $cmd += " --no-paper"
 }

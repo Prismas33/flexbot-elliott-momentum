@@ -59,16 +59,28 @@ Examples:
 .\start.ps1 -Action backtest -Symbol 'ETH/USDC:USDC' -Timeframe '15m' -LookbackDays 60 --strategy ema_macd
 
 # Backtest EMA+MACD apenas shorts, aceitando cruzamentos até 16 velas atrás
-.\start.ps1 -Action backtest -Symbol 'ETH/USDC:USDC' -Timeframe '15m' -LookbackDays 60 --strategy ema_macd -TradeBias short -CrossLookback 16
+.\start.ps1 -Action backtest -Symbol 'ETH/USDC:USDC' -Timeframe '15m' -LookbackDays 60 --strategy ema_macd -TradeBias short -CrossLookback 16 -LogLevel DEBUG
 
 # Backtestando apenas shorts com EMA+MACD
 .\start.ps1 -Action backtest -Symbol 'ETH/USDC:USDC' -Timeframe '15m' -LookbackDays 60 --strategy ema_macd -TradeBias short
+
+# Backtest EMA+MACD permitindo sinais sem divergência RSI
+.\start.ps1 -Action backtest -Symbol 'ETH/USDC:USDC' -Timeframe '15m' -LookbackDays 60 --strategy ema_macd -AllowNoDivergence
 
 # Run live paper trading loop (paper True by default)
 .\start.ps1 -Action live -Symbol 'ETH/USDC:USDC'
 
 # Run live real orders (⚠️ be careful!)
 .\start.ps1 -Action live -Symbol 'ETH/USDC:USDC' -NoPaper
+
+# Validar rapidamente se um par existe (CLI direto no bot)
+python .\elliott_momentum_breakout_bot.py --check-symbol 'ETH/USDC:USDC'
+
+# Validar par usando o script PowerShell
+ .\start.ps1 -CheckSymbol 'ETH/USDC:USDC'
+
+# Forçar modo paper mesmo que o config esteja em live
+python .\elliott_momentum_breakout_bot.py --paper-mode --live --symbol 'ETH/USDC:USDC'
 ```
 
 This script will:
@@ -88,6 +100,10 @@ streamlit run dashboard.py
 
 - Escolha par/timeframe/lookback na barra lateral e clique em "Executar backtest".
 - Use os seletores "Estratégia", "Direção" e "Velas para cruzamento EMA/MACD" para alternar entre **Momentum** ou **EMA + MACD (5/21 & 26-55-9)**, escolher o bias e definir quão recentes os cruzamentos precisam ser (por defeito 8 velas).
+- O seletor "Ambiente" na barra lateral alterna entre **Teste (paper)** e **Produção (live)**, gravando a preferência em `.flexbot_state/config.json`. O script principal lê essa configuração automaticamente (pode ser sobrescrita com `--paper-mode` ou `--no-paper`).
+- O botão "Consultar saldo" consulta o saldo estimado através da API (usa as credenciais configuradas) e a caixa "Validar par" verifica se o instrumento existe na corretora antes de rodar backtests/live.
+- O checkbox "Exigir divergência RSI (EMA+MACD)" controla se a confirmação EMA+MACD só aceita setups com divergência; deixe marcado para o comportamento padrão ou desmarque para testar sinais sem esse filtro.
+- Quando quiser debugar sinais (especialmente shorts), rode com `-LogLevel DEBUG` (ou `--log-level DEBUG` no script Python) para ver os detalhes de rejeição nas regras.
 - A UI mostra métricas resumidas, gráfico do PnL cumulativo e uma tabela com cada trade para inspeção/exportação.
 - Este backtest usa dados históricos até o momento da execução; não é streaming em tempo real.
 - A aba **Tempo real** lê arquivos `.flexbot_state/runtime.json` e `.flexbot_state/latest_backtest.json` que o bot atualiza automaticamente. Para vê-la viva, deixe `main_loop()` rodando (por exemplo: `.\start.ps1 -Action live`) enquanto o dashboard está aberto e clique em "Atualizar dados agora" quando quiser sincronizar.
@@ -96,7 +112,7 @@ streamlit run dashboard.py
 - Para manter as simulações alinhadas com uma banca pequena, os backtests utilizam capital inicial fixo de **$100** e arriscam **10% ($10)** por trade ao dimensionar as posições.
 - Todas as estratégias respeitam **RR mínimo de 3:1** (recompensa ≥ 3x o risco). Nas estratégias Momentum e EMA+MACD os multiplicadores de ATR foram calibrados (stop 1.5× / TP 4.5× e stop 1.8× / TP 5.4×) para que o alvo natural já seja ≥3R — se nem assim chegar em 3R, o trade é descartado.
 - O sizing do backtest usa banca inicial de **$100** e recalcula a cada trade: sempre 10% do capital corrente é arriscado (ex.: se a curva estiver em $124, o risco passa a $12.40 e o alvo padrão fica $37.20).
-- Antes de abrir qualquer compra, exigimos uma **divergência bullish simples de RSI** (último fundo do RSI mais alto enquanto o preço faz um fundo mais baixo). O filtro é aplicado a todas as estratégias e usa o mesmo timeframe do sinal.
+- Por padrão, a estratégia EMA+MACD exige uma **divergência de RSI** alinhada com o lado do trade (bullish para longs, bearish para shorts). Agora é possível desativar esse filtro na CLI (`--allow-no-divergence`), no script PowerShell (`-AllowNoDivergence`) ou diretamente no dashboard (desmarcando o checkbox) para comparar resultados.
 
 ## Managing API keys
 
