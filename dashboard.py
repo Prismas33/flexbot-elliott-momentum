@@ -33,13 +33,27 @@ with st.sidebar:
         return mapping.get(key, key)
 
     strategy = st.selectbox("Estratégia", options=["momentum","ema_macd"], format_func=strategy_label, index=0)
+    bias_label = {
+        "long": "Comprado",
+        "short": "Vendido",
+        "both": "Ambos",
+    }
+    trade_bias = st.selectbox("Direção", options=["long", "short", "both"], format_func=lambda k: bias_label.get(k, k), index=0)
+    cross_lookback = st.slider("Velas para cruzamento EMA/MACD", min_value=2, max_value=30, value=8, step=1)
     run_button = st.button("▶️ Executar backtest", use_container_width=True)
     st.markdown("---")
     st.caption("Para métricas em tempo real, mantenha `main_loop()` rodando (ex.: `start.ps1 -Action live`).")
 
 @st.cache_data(show_spinner=False)
-def run_backtest(symbol: str, timeframe: str, lookback_days: int, strategy: str):
-    df_trades, coverage = backtest_pair(symbol, timeframe, lookback_days=lookback_days, strategy=strategy)
+def run_backtest(symbol: str, timeframe: str, lookback_days: int, strategy: str, bias: str, cross_lookback: int):
+    df_trades, coverage = backtest_pair(
+        symbol,
+        timeframe,
+        lookback_days=lookback_days,
+        strategy=strategy,
+        bias=bias,
+        cross_lookback=cross_lookback,
+    )
     if df_trades is None or df_trades.empty:
         return None, coverage
     df_trades = df_trades.copy()
@@ -52,8 +66,10 @@ backtest_tab, realtime_tab = st.tabs(["Backtest", "Tempo real"])
 
 with backtest_tab:
     if run_button:
-        with st.spinner(f"Gerando backtest {symbol} {timeframe} (últimos {lookback_days} dias) — estratégia {strategy}..."):
-            df, coverage = run_backtest(symbol, timeframe, lookback_days, strategy)
+        with st.spinner(
+            f"Gerando backtest {symbol} {timeframe} (últimos {lookback_days} dias) — estratégia {strategy} | bias {trade_bias} | cross {cross_lookback} velas..."
+        ):
+            df, coverage = run_backtest(symbol, timeframe, lookback_days, strategy, trade_bias, cross_lookback)
         if df is None or df.empty:
             st.warning("Nenhuma operação encontrada para os parâmetros escolhidos.")
         else:
@@ -72,7 +88,9 @@ with backtest_tab:
             cols[2].metric("Média Gain", f"${avg_win:.2f}")
             cols[3].metric("Média Loss", f"${avg_loss:.2f}")
             st.metric("PNL total", f"${total_pnl:.2f}")
-            st.caption(f"Simulação: capital inicial ${simulation_base_capital:.0f} | risco {simulation_risk_per_trade*100:.0f}% por trade")
+            st.caption(
+                f"Simulação: capital inicial ${simulation_base_capital:.0f} | risco {simulation_risk_per_trade*100:.0f}% por trade | bias {bias_label.get(trade_bias, trade_bias)} | cross lookback {cross_lookback} velas"
+            )
 
             st.subheader("Evolução do PnL cumulativo")
             st.line_chart(df.set_index("timestamp")["cum_pnl"], use_container_width=True)
@@ -132,7 +150,9 @@ with realtime_tab:
         st.json(summary)
         sim = summary.get("simulation")
         if sim:
-            st.caption(f"Simulação salva: capital ${sim.get('base_capital', 0)} | risco {sim.get('risk_per_trade', 0)*100:.0f}%")
+            cross = sim.get('ema_cross_lookback')
+            cross_text = f" | cross lookback {cross} velas" if cross is not None else ""
+            st.caption(f"Simulação salva: capital ${sim.get('base_capital', 0)} | risco {sim.get('risk_per_trade', 0)*100:.0f}%{cross_text}")
         coverage = summary.get("coverage") or {}
         if coverage:
             st.caption("Velas carregadas na última execução")

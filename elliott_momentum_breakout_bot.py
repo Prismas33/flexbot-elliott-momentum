@@ -28,6 +28,9 @@ import numpy as np
 from ta.momentum import RSIIndicator
 from dotenv import load_dotenv
 
+from strategies.ema_macd_long import ema_macd_confirm_long
+from strategies.ema_macd_short import ema_macd_confirm_short
+
 from state_store import write_runtime_state, write_backtest_summary
 
 # Dependency check — helpful message if a module is missing
@@ -77,6 +80,7 @@ tf_bias_parent = {
 }
 # strategy toggles
 strategy_mode = "momentum"  # options: momentum, ema_macd
+trade_bias = "long"         # options: long, short, both
 momentum_stop_atr = 1.5
 momentum_tp_atr = 4.5  # garante 3R natural (tp/stop = 3)
 momentum_min_tf_agree = 1
@@ -89,6 +93,7 @@ ema_macd_signal = 9
 ema_macd_min_tf_agree = 1
 ema_macd_stop_atr = 1.8
 ema_macd_tp_atr = 5.4  # garante 3R natural (tp/stop = 3)
+ema_macd_cross_lookback = 8
 # trend filter
 trend_fast_span = 20
 trend_slow_span = 50
@@ -289,103 +294,23 @@ def momentum_confirm(df):
         "rsi_ok": rsi_ok,
     }
 
-def ema_macd_confirm(df, cross_lookback=8):
-    if df is None or len(df) < max(ema_slow_period, ema_macd_slow) + 5:
-        return False, {}
-    df = df.copy()
-    df['ema_fast'] = df['close'].ewm(span=ema_fast_period, adjust=False).mean()
-    df['ema_slow'] = df['close'].ewm(span=ema_slow_period, adjust=False).mean()
-    macd_line, signal_line, hist = compute_macd(df['close'], ema_macd_fast, ema_macd_slow, ema_macd_signal)
-    df['macd'] = macd_line
-    df['macd_signal'] = signal_line
-    df['macd_hist'] = hist
-    df['atr'] = compute_atr(df, atr_period)
-    df['rsi'] = compute_rsi(df, rsi_period)
-
-    def crossed_up(series_a, series_b, lookback):
-        length = len(series_a)
-        for offset in range(lookback):
-            idx = length - 1 - offset
-            prev_idx = idx - 1
-            if prev_idx < 0:
-                break
-            if series_a.iloc[idx] > series_b.iloc[idx] and series_a.iloc[prev_idx] <= series_b.iloc[prev_idx]:
-                return True
-        return False
-
-    ema_cross_recent = crossed_up(df['ema_fast'], df['ema_slow'], cross_lookback)
-    macd_cross_recent = crossed_up(df['macd'], df['macd_signal'], cross_lookback)
-
-    ema_aligned = df['ema_fast'].iloc[-1] > df['ema_slow'].iloc[-1]
-    macd_aligned = df['macd'].iloc[-1] > df['macd_signal'].iloc[-1]
-    histogram_positive = df['macd_hist'].iloc[-1] > 0
-    atr_available = df['atr'].iloc[-1] > 0
-
-    # evitar entradas em pico de histograma muito esticado
-    recent_hist = df['macd_hist'].iloc[-5:]
-    hist_now = recent_hist.iloc[-1]
-    hist_peak = recent_hist.max()
-    hist_ok = abs(hist_now) <= abs(hist_peak) * 1.1
-
-    # slope das EMAs
-    ema_fast_recent = df['ema_fast'].iloc[-5:]
-    ema_slow_recent = df['ema_slow'].iloc[-5:]
-    slope_fast = ema_fast_recent.iloc[-1] - ema_fast_recent.iloc[0]
-    slope_slow = ema_slow_recent.iloc[-1] - ema_slow_recent.iloc[0]
-    slope_ok = slope_fast > 0 and slope_slow >= -0.0001
-
-    # RSI divergência obrigatória
-    has_divergence = has_bullish_rsi_divergence(df)
-
-    # Validação de RSI no candle atual (evitar extremo)
-    rsi_val = float(df['rsi'].iloc[-1]) if not np.isnan(df['rsi'].iloc[-1]) else None
-    rsi_ok = True
-    if rsi_val is not None and (rsi_val < 28 or rsi_val > 78):
-        rsi_ok = False
-
-    confluence = (
-        (ema_cross_recent and macd_aligned) or
-        (macd_cross_recent and ema_aligned)
+def ema_macd_confirm(df, cross_lookback=None):
+    cross_lb = cross_lookback if cross_lookback is not None else ema_macd_cross_lookback
+    return ema_macd_confirm_long(
+        df,
+        ema_fast_period=ema_fast_period,
+        ema_slow_period=ema_slow_period,
+        ema_macd_fast=ema_macd_fast,
+        ema_macd_slow=ema_macd_slow,
+        ema_macd_signal=ema_macd_signal,
+        atr_period=atr_period,
+        rsi_period=rsi_period,
+        compute_atr=compute_atr,
+        compute_rsi=compute_rsi,
+        compute_macd=compute_macd,
+        has_bullish_rsi_divergence=has_bullish_rsi_divergence,
+        cross_lookback=cross_lb,
     )
-
-    confirmed = (
-        ema_aligned and
-        macd_aligned and
-        histogram_positive and
-        confluence and
-        has_divergence and
-        atr_available and
-        slope_ok and
-        hist_ok and
-        rsi_ok
-    )
-
-    score = 3 if confirmed else 0
-
-    details = {
-        "ema_fast": float(df['ema_fast'].iloc[-1]),
-        "ema_slow": float(df['ema_slow'].iloc[-1]),
-        "macd": float(df['macd'].iloc[-1]),
-        "macd_signal": float(df['macd_signal'].iloc[-1]),
-        "macd_hist": float(df['macd_hist'].iloc[-1]),
-        "atr": float(df['atr'].iloc[-1]),
-        "last_close": float(df['close'].iloc[-1]),
-        "rsi": rsi_val,
-        "rsi_ok": rsi_ok,
-        "hist_ok": hist_ok,
-        "slope_fast": float(slope_fast),
-        "slope_slow": float(slope_slow),
-        "ema_cross_recent": ema_cross_recent,
-        "macd_cross_recent": macd_cross_recent,
-        "has_divergence": has_divergence,
-        "score": score,
-    }
-    if confirmed:
-        details["trigger"] = "ema_macd" if ema_cross_recent and macd_cross_recent else ("ema" if ema_cross_recent else "macd")
-    else:
-        details["trigger"] = None
-
-    return confirmed, details
 
 # ---------- Position sizing ----------
 def fetch_account_balance():
@@ -408,9 +333,13 @@ def compute_size(account_balance, entry_price, stop_price, risk_per_trade=defaul
     qty = risk_amount / risk_per_unit
     return max(0, qty)
 
-def compute_rr(entry_price, stop_price, tp_price):
-    risk = entry_price - stop_price
-    reward = tp_price - entry_price
+def compute_rr(entry_price, stop_price, tp_price, side='buy'):
+    if side == 'buy':
+        risk = entry_price - stop_price
+        reward = tp_price - entry_price
+    else:
+        risk = stop_price - entry_price
+        reward = entry_price - tp_price
     if risk <= 0 or reward <= 0:
         return None
     return reward / risk
@@ -466,6 +395,32 @@ def has_bullish_rsi_divergence(df, order=None):
         return False
     return price2 < price1 and rsi2 > rsi1
 
+def has_bearish_rsi_divergence(df, order=None):
+    if df is None or len(df) < 40:
+        return False
+    order = order or local_extrema_order
+    close = df['close']
+    rsi = compute_rsi(df, rsi_period)
+    if rsi.isna().all():
+        return False
+    pts = find_turning_points(close, order=order)
+    highs = [idx for idx, typ in pts if typ == 'max']
+    if len(highs) < 2:
+        return False
+    idx1, idx2 = highs[-2], highs[-1]
+    if (idx2 - idx1) < 8:
+        return False
+    price1 = close.iloc[idx1]
+    price2 = close.iloc[idx2]
+    rsi1 = rsi.iloc[idx1]
+    rsi2 = rsi.iloc[idx2]
+    if np.isnan(price1) or np.isnan(price2) or np.isnan(rsi1) or np.isnan(rsi2):
+        return False
+    price_push_pct = abs(price2 - price1) / price1
+    if price_push_pct < 0.015:
+        return False
+    return price2 > price1 and rsi2 < rsi1
+
 def determine_trend_direction(df, fast=trend_fast_span, slow=trend_slow_span):
     if df is None or len(df) < slow + 5:
         return "unknown"
@@ -494,6 +449,10 @@ def compute_symbol_bias(symbol):
 def bias_allows_long(tf, bias_map):
     direction = bias_map.get(tf, "both")
     return direction != "down"
+
+def bias_allows_short(tf, bias_map):
+    direction = bias_map.get(tf, "both")
+    return direction != "up"
 
 def bias_from_slices(tf, ts, slice_store):
     parent = tf_bias_parent.get(tf)
@@ -543,6 +502,7 @@ def serialize_open_positions():
     for pos in open_positions:
         serialized.append({
             "symbol": pos.get("symbol"),
+            "side": pos.get("side"),
             "qty_current": pos.get("qty_current"),
             "qty_total": pos.get("qty_total"),
             "entry_price": pos.get("entry_price"),
@@ -557,19 +517,19 @@ def serialize_open_positions():
         })
     return serialized
 
-def enter_momentum_trade(symbol, entry_price, stop_price, tp_price, account_balance, strategy_label="momentum", risk_multiplier=1.0):
+def enter_position(symbol, entry_price, stop_price, tp_price, account_balance, *, side, strategy_label, risk_multiplier=1.0):
     risk_per_trade = max(default_risk_per_trade * risk_multiplier, default_risk_per_trade * 0.25)
     qty = compute_size(account_balance, entry_price, stop_price, risk_per_trade)
     qty = max(0, qty)
     if qty == 0:
-        logging.info("Momentum trade abortado — qty=0")
+        logging.info("%s trade abortado — qty=0", strategy_label)
         return None
-    order = place_market_order(symbol, 'buy', qty)
+    order = place_market_order(symbol, 'buy' if side == 'buy' else 'sell', qty)
     if order is None:
         return None
     pos = {
         "symbol": symbol,
-        "side": "buy",
+        "side": side,
         "entry_price": entry_price,
         "qty_total": qty,
         "qty_partial": qty,
@@ -585,7 +545,7 @@ def enter_momentum_trade(symbol, entry_price, stop_price, tp_price, account_bala
         "risk_multiplier": risk_multiplier,
     }
     open_positions.append(pos)
-    place_conditional_orders(symbol, 'buy', qty, stop_price, tp_price)
+    place_conditional_orders(symbol, side, qty, stop_price, tp_price)
     return pos
 
 def monitor_and_close_positions(open_positions):
@@ -642,8 +602,12 @@ def monitor_and_close_positions(open_positions):
                         logging.error("Erro fechar parcial em %s: %s", pos['symbol'], e)
 
         # TP/SL final para o restante
-        hit_tp = (tp is not None) and (high >= tp)
-        hit_sl = (stop is not None) and (low <= stop)
+        if pos['side'] == 'buy':
+            hit_tp = (tp is not None) and (high >= tp)
+            hit_sl = (stop is not None) and (low <= stop)
+        else:
+            hit_tp = (tp is not None) and (low <= tp)
+            hit_sl = (stop is not None) and (high >= stop)
         if hit_tp or hit_sl:
             side = 'sell' if pos['side'] == 'buy' else 'buy'
             qty = pos['qty_current']
@@ -695,6 +659,10 @@ def analyze_momentum_and_maybe_trade(symbol):
         "reference_tf": None,
         "score": None,
     }
+    if trade_bias == "short":
+        summary["status"] = "bias_not_supported"
+        summary["note"] = "Momentum strategy opera apenas comprado."
+        return None, summary
     bias_map = compute_symbol_bias(symbol)
     summary["bias"] = bias_map
     confirmations = {}
@@ -753,13 +721,14 @@ def analyze_momentum_and_maybe_trade(symbol):
         summary["status"] = "min_rr_not_met"
         return None, summary
     account_balance = fetch_account_balance()
-    risk_mult = get_risk_multiplier(symbol, "momentum")
+    risk_mult = get_risk_multiplier(symbol, "momentum_long")
     if risk_mult < 1.0:
-        streak = loss_streaks[_loss_key(symbol, "momentum")]
+        streak = loss_streaks[_loss_key(symbol, "momentum_long")]
         logging.info("Risco reduzido em %s (Momentum) — streak=%d risco=%.2f%%", symbol, streak, default_risk_per_trade * risk_mult * 100)
-    pos = enter_momentum_trade(symbol, entry_price, stop_price, tp_price, account_balance, strategy_label="momentum", risk_multiplier=risk_mult)
+    pos = enter_position(symbol, entry_price, stop_price, tp_price, account_balance, side='buy', strategy_label="momentum_long", risk_multiplier=risk_mult)
     summary["should_enter"] = pos is not None
     summary["entry_price"] = entry_price
+    summary["direction"] = "long"
     return pos, summary
 
 def analyze_ema_macd_and_maybe_trade(symbol):
@@ -777,53 +746,169 @@ def analyze_ema_macd_and_maybe_trade(symbol):
     for tf in timeframes:
         bias_dir = bias_map.get(tf, "both")
         df = fetch_ohlcv(symbol, tf, limit=lookback)
+        tf_entry = {"bias": bias_dir}
         if df is None or len(df) < ema_slow_period + 10:
-            confirmations[tf] = {"confirmed": False}
+            tf_entry["long"] = {"confirmed": False, "bias": bias_dir}
+            tf_entry["short"] = {"confirmed": False, "bias": bias_dir}
+            confirmations[tf] = tf_entry
             continue
-        confirmed, details = ema_macd_confirm(df)
-        if bias_dir == "down" and confirmed and details.get("score", 0) < ema_macd_bias_override_score:
-            confirmations[tf] = {"confirmed": False, "bias_blocked": True}
-            continue
-        confirmations[tf] = {
-            "confirmed": confirmed,
-            "details": details,
-            "price": details.get("last_close"),
-            "atr": details.get("atr"),
-            "bias": bias_dir
+
+        if trade_bias in ("long", "both"):
+            confirmed_long, details_long = ema_macd_confirm(df, cross_lookback=ema_macd_cross_lookback)
+            long_info = {
+                "confirmed": confirmed_long,
+                "details": details_long,
+                "price": details_long.get("last_close") if details_long else None,
+                "atr": details_long.get("atr") if details_long else None,
+                "bias": bias_dir,
+            }
+            if confirmed_long and not bias_allows_long(tf, bias_map) and details_long.get("score", 0) < ema_macd_bias_override_score:
+                long_info["confirmed"] = False
+                long_info["bias_blocked"] = True
+            tf_entry["long"] = long_info
+        else:
+            tf_entry["long"] = {"confirmed": False, "bias": bias_dir}
+
+        if trade_bias in ("short", "both"):
+            confirmed_short, details_short = ema_macd_confirm_short(
+                df,
+                ema_fast_period=ema_fast_period,
+                ema_slow_period=ema_slow_period,
+                ema_macd_fast=ema_macd_fast,
+                ema_macd_slow=ema_macd_slow,
+                ema_macd_signal=ema_macd_signal,
+                atr_period=atr_period,
+                rsi_period=rsi_period,
+                compute_atr=compute_atr,
+                compute_rsi=compute_rsi,
+                compute_macd=compute_macd,
+                has_bearish_rsi_divergence=has_bearish_rsi_divergence,
+                cross_lookback=ema_macd_cross_lookback,
+            )
+            short_info = {
+                "confirmed": confirmed_short,
+                "details": details_short,
+                "price": details_short.get("last_close") if details_short else None,
+                "atr": details_short.get("atr") if details_short else None,
+                "bias": bias_dir,
+            }
+            if confirmed_short and not bias_allows_short(tf, bias_map) and details_short.get("score", 0) < ema_macd_bias_override_score:
+                short_info["confirmed"] = False
+                short_info["bias_blocked"] = True
+            tf_entry["short"] = short_info
+        else:
+            tf_entry["short"] = {"confirmed": False, "bias": bias_dir}
+
+        confirmations[tf] = tf_entry
+    summary["signals"] = {
+        tf: {
+            "long": data.get("long", {}).get("confirmed", False),
+            "short": data.get("short", {}).get("confirmed", False),
         }
-    summary["signals"] = {tf: data.get("confirmed", False) for tf, data in confirmations.items()}
-    ready = [
-        (tf, data)
         for tf, data in confirmations.items()
-        if data.get("confirmed") and data.get("details")
-    ]
-    required = min(ema_macd_min_tf_agree, len(ready))
-    if len(ready) < max(1, required):
+    }
+    candidates = []
+    if trade_bias in ("long", "both"):
+        long_ready = [
+            (tf, data.get("long"))
+            for tf, data in confirmations.items()
+            if data.get("long", {}).get("confirmed") and data.get("long", {}).get("details")
+        ]
+        if long_ready:
+            long_ready.sort(key=lambda item: item[1]["details"].get("score", 0), reverse=True)
+            ref_tf, ref_data = long_ready[0]
+            entry_price = ref_data.get("price")
+            atr_val = ref_data.get("atr") or 0
+            if entry_price is not None and atr_val > 0:
+                stop_price = entry_price - atr_val * ema_macd_stop_atr
+                tp_price = entry_price + atr_val * ema_macd_tp_atr
+                rr = compute_rr(entry_price, stop_price, tp_price, side='buy')
+                candidates.append({
+                    "tf": ref_tf,
+                    "details": ref_data.get("details", {}),
+                    "entry_price": entry_price,
+                    "atr": atr_val,
+                    "stop_price": stop_price,
+                    "tp_price": tp_price,
+                    "rr": rr,
+                    "score": ref_data.get("details", {}).get("score", 0),
+                    "side": 'buy',
+                    "direction": "long",
+                    "risk_key": "ema_macd_long",
+                })
+
+    if trade_bias in ("short", "both"):
+        short_ready = [
+            (tf, data.get("short"))
+            for tf, data in confirmations.items()
+            if data.get("short", {}).get("confirmed") and data.get("short", {}).get("details")
+        ]
+        if short_ready:
+            short_ready.sort(key=lambda item: item[1]["details"].get("score", 0), reverse=True)
+            ref_tf, ref_data = short_ready[0]
+            entry_price = ref_data.get("price")
+            atr_val = ref_data.get("atr") or 0
+            if entry_price is not None and atr_val > 0:
+                stop_price = entry_price + atr_val * ema_macd_stop_atr
+                tp_price = entry_price - atr_val * ema_macd_tp_atr
+                rr = compute_rr(entry_price, stop_price, tp_price, side='sell')
+                candidates.append({
+                    "tf": ref_tf,
+                    "details": ref_data.get("details", {}),
+                    "entry_price": entry_price,
+                    "atr": atr_val,
+                    "stop_price": stop_price,
+                    "tp_price": tp_price,
+                    "rr": rr,
+                    "score": ref_data.get("details", {}).get("score", 0),
+                    "side": 'sell',
+                    "direction": "short",
+                    "risk_key": "ema_macd_short",
+                })
+
+    if not candidates:
+        summary["status"] = "no_confirmed"
         return None, summary
-    ready.sort(key=lambda item: item[1]["details"].get("score", 0), reverse=True)
-    ref_tf, ref_data = ready[0]
-    summary["reference_tf"] = ref_tf
-    summary["score"] = ref_data["details"].get("score")
-    entry_price = ref_data["price"]
-    atr_val = ref_data.get("atr") or ref_data["details"].get("atr")
-    if not entry_price or not atr_val:
-        summary["status"] = "no_price_or_atr"
-        return None, summary
-    stop_price = entry_price - atr_val * ema_macd_stop_atr
-    tp_price = entry_price + atr_val * ema_macd_tp_atr
-    rr = compute_rr(entry_price, stop_price, tp_price)
-    summary["rr"] = rr
-    if rr is None or rr < min_rr_required:
+
+    valid_candidates = [c for c in candidates if c.get("rr") is not None and c.get("rr") >= min_rr_required]
+    if not valid_candidates:
         summary["status"] = "min_rr_not_met"
+        summary["rr"] = max((c.get("rr") or 0) for c in candidates)
         return None, summary
+
+    valid_candidates.sort(key=lambda c: (c.get("score", 0), c.get("rr", 0)), reverse=True)
+    selected = valid_candidates[0]
+
+    summary["reference_tf"] = selected["tf"]
+    summary["score"] = selected.get("score")
+    summary["rr"] = selected.get("rr")
+    summary["entry_price"] = selected.get("entry_price")
+    summary["direction"] = selected.get("direction")
+    summary["trigger"] = selected.get("details", {}).get("trigger")
+
     account_balance = fetch_account_balance()
-    risk_mult = get_risk_multiplier(symbol, "ema_macd")
+    risk_mult = get_risk_multiplier(symbol, selected["risk_key"])
     if risk_mult < 1.0:
-        streak = loss_streaks[_loss_key(symbol, "ema_macd")]
-        logging.info("Risco reduzido em %s (EMA+MACD) — streak=%d risco=%.2f%%", symbol, streak, default_risk_per_trade * risk_mult * 100)
-    pos = enter_momentum_trade(symbol, entry_price, stop_price, tp_price, account_balance, strategy_label="ema_macd", risk_multiplier=risk_mult)
+        streak = loss_streaks[_loss_key(symbol, selected["risk_key"])]
+        logging.info(
+            "Risco reduzido em %s (%s) — streak=%d risco=%.2f%%",
+            symbol,
+            selected["risk_key"],
+            streak,
+            default_risk_per_trade * risk_mult * 100,
+        )
+
+    pos = enter_position(
+        symbol,
+        selected["entry_price"],
+        selected["stop_price"],
+        selected["tp_price"],
+        account_balance,
+        side=selected["side"],
+        strategy_label=selected["risk_key"],
+        risk_multiplier=risk_mult,
+    )
     summary["should_enter"] = pos is not None
-    summary["entry_price"] = entry_price
     return pos, summary
 
 def analyze_and_maybe_trade(symbol):
@@ -852,18 +937,14 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
         if entry_side == 'buy':
             max_price = high
             rr_reached = (max_price - entry_ref_price) / risk_per_unit
-            # mover SL para BE a 1R
             if (not be_moved) and rr_reached >= break_even_rr:
                 current_sl = entry_ref_price
                 be_moved = True
-            # parcial a 1.5R (na simulacao assumimos metade fechada nesse ponto)
             if (not partial_done) and rr_reached >= take_partial_rr:
                 partial_done = True
-            # verificar hits com SL/TP atual
             hit_tp = (high >= tp_price)
             hit_sl = (low <= current_sl)
             if hit_tp and not hit_sl:
-                # se parcial foi tomada, metade do lucro ja foi antes em take_partial_rr*R
                 if partial_done:
                     price_partial = entry_ref_price + take_partial_rr * risk_per_unit
                     pnl_partial = (price_partial - entry_ref_price) * 0.5
@@ -895,20 +976,73 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
                 else:
                     pnl_total = exit_price - entry_ref_price
                 return {"exit_price": exit_price, "exit_idx": i, "outcome": outcome, "pnl": pnl_total}
+        else:
+            min_price = low
+            rr_reached = (entry_ref_price - min_price) / risk_per_unit
+            if (not be_moved) and rr_reached >= break_even_rr:
+                current_sl = entry_ref_price
+                be_moved = True
+            if (not partial_done) and rr_reached >= take_partial_rr:
+                partial_done = True
+            hit_tp = (low <= tp_price)
+            hit_sl = (high >= current_sl)
+            if hit_tp and not hit_sl:
+                if partial_done:
+                    price_partial = entry_ref_price - take_partial_rr * risk_per_unit
+                    pnl_partial = (entry_ref_price - price_partial) * 0.5
+                    pnl_rest = (entry_ref_price - tp_price) * 0.5
+                    pnl_total = pnl_partial + pnl_rest
+                else:
+                    pnl_total = entry_ref_price - tp_price
+                return {"exit_price": tp_price, "exit_idx": i, "outcome":"tp", "pnl": pnl_total}
+            if hit_sl and not hit_tp:
+                if partial_done:
+                    price_partial = entry_ref_price - take_partial_rr * risk_per_unit
+                    pnl_partial = (entry_ref_price - price_partial) * 0.5
+                    pnl_rest = (entry_ref_price - current_sl) * 0.5
+                    pnl_total = pnl_partial + pnl_rest
+                else:
+                    pnl_total = entry_ref_price - current_sl
+                return {"exit_price": current_sl, "exit_idx": i, "outcome":"sl", "pnl": pnl_total}
+            if hit_tp and hit_sl:
+                o = df['open'].iloc[i]
+                dist_tp = abs(o - tp_price)
+                dist_sl = abs(o - current_sl)
+                outcome = "tp" if dist_tp <= dist_sl else "sl"
+                exit_price = tp_price if outcome=="tp" else current_sl
+                if partial_done:
+                    price_partial = entry_ref_price - take_partial_rr * risk_per_unit
+                    pnl_partial = (entry_ref_price - price_partial) * 0.5
+                    pnl_rest = (entry_ref_price - exit_price) * 0.5
+                    pnl_total = pnl_partial + pnl_rest
+                else:
+                    pnl_total = entry_ref_price - exit_price
+                return {"exit_price": exit_price, "exit_idx": i, "outcome": outcome, "pnl": pnl_total}
 
     # se nunca bateu SL/TP, sai no close final
     final_price = df['close'].iloc[-1]
-    if partial_done:
-        price_partial = entry_ref_price + take_partial_rr * risk_per_unit
-        pnl_partial = (price_partial - entry_ref_price) * 0.5
-        pnl_rest = (final_price - entry_ref_price) * 0.5
-        pnl_total = pnl_partial + pnl_rest
+    if entry_side == 'buy':
+        if partial_done:
+            price_partial = entry_ref_price + take_partial_rr * risk_per_unit
+            pnl_partial = (price_partial - entry_ref_price) * 0.5
+            pnl_rest = (final_price - entry_ref_price) * 0.5
+            pnl_total = pnl_partial + pnl_rest
+        else:
+            pnl_total = final_price - entry_ref_price
     else:
-        pnl_total = final_price - entry_ref_price
+        if partial_done:
+            price_partial = entry_ref_price - take_partial_rr * risk_per_unit
+            pnl_partial = (entry_ref_price - price_partial) * 0.5
+            pnl_rest = (entry_ref_price - final_price) * 0.5
+            pnl_total = pnl_partial + pnl_rest
+        else:
+            pnl_total = entry_ref_price - final_price
     return {"exit_price": final_price, "exit_idx": n-1, "outcome": "none", "pnl": pnl_total}
 
-def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None):
+def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None, cross_lookback=None):
     strategy = strategy or strategy_mode
+    effective_bias = bias or trade_bias
+    cross_lb = cross_lookback if cross_lookback is not None else ema_macd_cross_lookback
     logging.info("Backtest %s %s last %d days", symbol, timeframe, lookback_days)
     minutes = timeframe_to_minutes(timeframe)
     candles_needed = int((24*60/ minutes) * lookback_days) + 200
@@ -945,8 +1079,11 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None):
             d = dfrag[dfrag.index <= ts].tail(lookback)
             slices[tf] = d if len(d) >= 60 else None
         bias_snapshot = {tf: bias_from_slices(tf, ts, slice_store) for tf in timeframes}
-        rr_value = None
+        selected_trade = None
+
         if strategy == "momentum":
+            if effective_bias == "short":
+                continue
             momentum_ready = []
             for tf in timeframes:
                 slice_df = slices.get(tf)
@@ -955,12 +1092,13 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None):
                 bias_dir = bias_snapshot.get(tf, "both")
                 has_div = has_bullish_rsi_divergence(slice_df)
                 confirmed, details = momentum_confirm(slice_df)
-                if confirmed and details.get("atr"):
-                    if has_div:
-                        details["score"] = details.get("score", 0) + 0.5
-                    if bias_dir == "down" and details.get("score", 0) < momentum_bias_override_score:
-                        continue
-                    momentum_ready.append((tf, details))
+                if not confirmed or not details.get("atr"):
+                    continue
+                if has_div:
+                    details["score"] = details.get("score", 0) + 0.5
+                if bias_dir == "down" and details.get("score", 0) < momentum_bias_override_score:
+                    continue
+                momentum_ready.append((tf, details))
             required = max(1, min(momentum_min_tf_agree, len(momentum_ready)))
             if len(momentum_ready) < required:
                 continue
@@ -972,58 +1110,135 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None):
                 continue
             stop_price = entry_price - atr_val * momentum_stop_atr
             tp_price = entry_price + atr_val * momentum_tp_atr
-            rr = compute_rr(entry_price, stop_price, tp_price)
+            rr = compute_rr(entry_price, stop_price, tp_price, side='buy')
             if rr is None or rr < min_rr_required:
                 continue
-            rr_value = rr
+            selected_trade = {
+                "tf": ref_tf,
+                "entry_price": entry_price,
+                "stop_price": stop_price,
+                "tp_price": tp_price,
+                "rr": rr,
+                "side": "buy",
+                "risk_key": "momentum_long",
+                "direction": "long",
+                "details": detail,
+            }
         elif strategy == "ema_macd":
-            ema_ready = []
-            for tf in timeframes:
-                slice_df = slices.get(tf)
-                if slice_df is None or len(slice_df) < ema_slow_period + 10:
-                    continue
-                bias_dir = bias_snapshot.get(tf, "both")
-                confirmed, details = ema_macd_confirm(slice_df)
-                if confirmed and details.get("atr"):
-                    if bias_dir == "down" and details.get("score", 0) < ema_macd_bias_override_score:
+            candidates = []
+            if effective_bias in ("long", "both"):
+                for tf in timeframes:
+                    slice_df = slices.get(tf)
+                    if slice_df is None or len(slice_df) < ema_slow_period + 10:
                         continue
-                    ema_ready.append((tf, details))
-            required = max(1, min(ema_macd_min_tf_agree, len(ema_ready)))
-            if len(ema_ready) < required:
+                    confirmed_long, details_long = ema_macd_confirm(slice_df, cross_lookback=cross_lb)
+                    if not confirmed_long or not details_long.get("atr"):
+                        continue
+                    if not bias_allows_long(tf, bias_snapshot) and details_long.get("score", 0) < ema_macd_bias_override_score:
+                        continue
+                    entry_price = details_long.get("last_close")
+                    atr_val = details_long.get("atr")
+                    if entry_price is None or atr_val in (None, 0):
+                        continue
+                    stop_price = entry_price - atr_val * ema_macd_stop_atr
+                    tp_price = entry_price + atr_val * ema_macd_tp_atr
+                    rr = compute_rr(entry_price, stop_price, tp_price, side='buy')
+                    if rr is None or rr < min_rr_required:
+                        continue
+                    candidates.append({
+                        "tf": tf,
+                        "entry_price": entry_price,
+                        "stop_price": stop_price,
+                        "tp_price": tp_price,
+                        "rr": rr,
+                        "score": details_long.get("score", 0),
+                        "side": "buy",
+                        "risk_key": "ema_macd_long",
+                        "direction": "long",
+                        "details": details_long,
+                    })
+            if effective_bias in ("short", "both"):
+                for tf in timeframes:
+                    slice_df = slices.get(tf)
+                    if slice_df is None or len(slice_df) < ema_slow_period + 10:
+                        continue
+                    confirmed_short, details_short = ema_macd_confirm_short(
+                        slice_df,
+                        ema_fast_period=ema_fast_period,
+                        ema_slow_period=ema_slow_period,
+                        ema_macd_fast=ema_macd_fast,
+                        ema_macd_slow=ema_macd_slow,
+                        ema_macd_signal=ema_macd_signal,
+                        atr_period=atr_period,
+                        rsi_period=rsi_period,
+                        compute_atr=compute_atr,
+                        compute_rsi=compute_rsi,
+                        compute_macd=compute_macd,
+                        has_bearish_rsi_divergence=has_bearish_rsi_divergence,
+                        cross_lookback=cross_lb,
+                    )
+                    if not confirmed_short or not details_short.get("atr"):
+                        continue
+                    if not bias_allows_short(tf, bias_snapshot) and details_short.get("score", 0) < ema_macd_bias_override_score:
+                        continue
+                    entry_price = details_short.get("last_close")
+                    atr_val = details_short.get("atr")
+                    if entry_price is None or atr_val in (None, 0):
+                        continue
+                    stop_price = entry_price + atr_val * ema_macd_stop_atr
+                    tp_price = entry_price - atr_val * ema_macd_tp_atr
+                    rr = compute_rr(entry_price, stop_price, tp_price, side='sell')
+                    if rr is None or rr < min_rr_required:
+                        continue
+                    candidates.append({
+                        "tf": tf,
+                        "entry_price": entry_price,
+                        "stop_price": stop_price,
+                        "tp_price": tp_price,
+                        "rr": rr,
+                        "score": details_short.get("score", 0),
+                        "side": "sell",
+                        "risk_key": "ema_macd_short",
+                        "direction": "short",
+                        "details": details_short,
+                    })
+            if not candidates:
                 continue
-            ema_ready.sort(key=lambda item: item[1].get("score", 0), reverse=True)
-            ref_tf, detail = ema_ready[0]
-            entry_price = detail.get("last_close")
-            atr_val = detail.get("atr")
-            if entry_price is None or atr_val in (None, 0):
-                continue
-            stop_price = entry_price - atr_val * ema_macd_stop_atr
-            tp_price = entry_price + atr_val * ema_macd_tp_atr
-            rr = compute_rr(entry_price, stop_price, tp_price)
-            if rr is None or rr < min_rr_required:
-                continue
-            rr_value = rr
+            candidates.sort(key=lambda c: (c.get("score", 0), c.get("rr", 0)), reverse=True)
+            selected_trade = candidates[0]
         else:
             logging.warning("Estratégia %s não suportada no backtest.", strategy)
             break
 
-        if rr_value is None:
+        if selected_trade is None:
             continue
+
+        entry_price = selected_trade["entry_price"]
+        stop_price = selected_trade["stop_price"]
+        tp_price = selected_trade["tp_price"]
+        rr_value = selected_trade["rr"]
+        entry_side = selected_trade["side"]
+        risk_key = selected_trade["risk_key"]
+        trade_direction = selected_trade.get("direction", "long")
         entry_idx = i
-        risk_mult = get_risk_multiplier(symbol, strategy, store=bt_loss_streaks)
+        risk_mult = get_risk_multiplier(symbol, risk_key, store=bt_loss_streaks)
         effective_risk = max(sim_risk * risk_mult, sim_risk * 0.25)
         position_size = compute_size(current_equity, entry_price, stop_price, effective_risk)
         if position_size <= 0:
             continue
-        outcome = simulate_trade_on_series(df_main, entry_idx, 'buy', stop_price, tp_price, entry_price)
+        outcome = simulate_trade_on_series(df_main, entry_idx, entry_side, stop_price, tp_price, entry_price)
         pnl_price = outcome['pnl']
         pnl_value = pnl_price * position_size
-        actual_risk_value = position_size * max(0, entry_price - stop_price)
+        actual_risk_value = position_size * abs(stop_price - entry_price)
         planned_risk_value = current_equity * effective_risk
         trade = {
             "timestamp": ts,
             "symbol": symbol,
-            "strategy": strategy,
+            "strategy": risk_key,
+            "base_strategy": strategy,
+            "direction": trade_direction,
+            "side": entry_side,
+            "timeframe": selected_trade.get("tf"),
             "entry_price": entry_price,
             "stop_price": stop_price,
             "tp_price": tp_price,
@@ -1037,7 +1252,7 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None):
             "pnl": pnl_value,
             "rr": rr_value,
             "risk_multiplier": risk_mult,
-            "risk_per_trade": effective_risk
+            "risk_per_trade": effective_risk,
         }
         results.append(trade)
         current_equity += pnl_value
@@ -1047,7 +1262,7 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None):
             outcome_label = "loss"
         else:
             outcome_label = "breakeven"
-        register_trade_outcome(symbol, strategy, outcome_label, store=bt_loss_streaks)
+        register_trade_outcome(symbol, risk_key, outcome_label, store=bt_loss_streaks)
     if len(results) == 0:
         logging.info("Nenhuma operação gerada no backtest.")
         return pd.DataFrame(), coverage_info
@@ -1095,6 +1310,8 @@ if __name__ == "__main__":
     parser.add_argument('--lookback-days', dest='lookback_days', type=int, default=60, help='Lookback days for backtest')
     parser.add_argument('--no-paper', dest='paper', action='store_false', help='Disable paper mode (will execute real orders)')
     parser.add_argument('--strategy', choices=['momentum','ema_macd'], default='momentum', help='Seleciona estratégia principal')
+    parser.add_argument('--cross-lookback', dest='cross_lookback', type=int, default=ema_macd_cross_lookback, help='Janela (nº de velas) para aceitar cruzamentos EMA/MACD recentes')
+    parser.add_argument('--trade-bias', choices=['long','short','both'], default=trade_bias, help='Direção de trade: only long, only short ou ambos')
     args = parser.parse_args()
 
     logging.info("Script iniciado. paper=%s", paper)
@@ -1110,6 +1327,12 @@ if __name__ == "__main__":
     strategy_mode = args.strategy
     logging.info("Estratégia ativa: %s", strategy_mode)
 
+    trade_bias = args.trade_bias
+    logging.info("Bias de trade ativo: %s", trade_bias)
+
+    ema_macd_cross_lookback = args.cross_lookback
+    logging.info("EMA/MACD cross lookback: %d velas", ema_macd_cross_lookback)
+
     if args.live:
         logging.info("Running live main loop for symbol=%s", args.symbol)
         # user should set API keys
@@ -1117,7 +1340,14 @@ if __name__ == "__main__":
     else:
         logging.info("Running backtest for %s %s (lookback %d days)", args.symbol, args.timeframe, args.lookback_days)
         try:
-            df_trades, coverage_info = backtest_pair(args.symbol, args.timeframe, lookback_days=args.lookback_days, strategy=args.strategy)
+            df_trades, coverage_info = backtest_pair(
+                args.symbol,
+                args.timeframe,
+                lookback_days=args.lookback_days,
+                strategy=args.strategy,
+                bias=trade_bias,
+                cross_lookback=ema_macd_cross_lookback,
+            )
             if df_trades is not None and not df_trades.empty:
                 print(df_trades.head())
                 df_trades.to_csv(f"backtest_{args.symbol.replace('/','_')}_{args.timeframe}_trades.csv", index=False)
@@ -1131,6 +1361,7 @@ if __name__ == "__main__":
                 simulation={
                     "base_capital": simulation_base_capital,
                     "risk_per_trade": simulation_risk_per_trade,
+                    "ema_cross_lookback": ema_macd_cross_lookback,
                 }
             )
         except Exception as e:

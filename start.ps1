@@ -6,6 +6,9 @@ param(
     [int]$LookbackDays = 60,
     [ValidateSet('momentum','ema_macd')]
     [string]$Strategy = 'momentum',
+    [ValidateSet('long','short','both')]
+    [string]$TradeBias = 'long',
+    [int]$CrossLookback = 8,
     [switch]$NoPaper
 )
 
@@ -41,6 +44,8 @@ if ($Action -eq 'live') {
     $cmd += " --symbol $Symbol --timeframe $Timeframe --lookback-days $LookbackDays"
 }
 $cmd += " --strategy $Strategy"
+$cmd += " --trade-bias $TradeBias"
+$cmd += " --cross-lookback $CrossLookback"
 if ($NoPaper) {
     $cmd += " --no-paper"
 }

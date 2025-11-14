@@ -58,6 +58,12 @@ Examples:
 # Backtest com estratégia EMA+MACD (EMA 5/21 + MACD 26-55-9)
 .\start.ps1 -Action backtest -Symbol 'ETH/USDC:USDC' -Timeframe '15m' -LookbackDays 60 --strategy ema_macd
 
+# Backtest EMA+MACD apenas shorts, aceitando cruzamentos até 16 velas atrás
+.\start.ps1 -Action backtest -Symbol 'ETH/USDC:USDC' -Timeframe '15m' -LookbackDays 60 --strategy ema_macd -TradeBias short -CrossLookback 16
+
+# Backtestando apenas shorts com EMA+MACD
+.\start.ps1 -Action backtest -Symbol 'ETH/USDC:USDC' -Timeframe '15m' -LookbackDays 60 --strategy ema_macd -TradeBias short
+
 # Run live paper trading loop (paper True by default)
 .\start.ps1 -Action live -Symbol 'ETH/USDC:USDC'
 
@@ -81,7 +87,7 @@ streamlit run dashboard.py
 ```
 
 - Escolha par/timeframe/lookback na barra lateral e clique em "Executar backtest".
-- Use o seletor "Estratégia" para alternar entre **Momentum** ou **EMA + MACD (5/21 & 26-55-9)** e comparar os resultados.
+- Use os seletores "Estratégia", "Direção" e "Velas para cruzamento EMA/MACD" para alternar entre **Momentum** ou **EMA + MACD (5/21 & 26-55-9)**, escolher o bias e definir quão recentes os cruzamentos precisam ser (por defeito 8 velas).
 - A UI mostra métricas resumidas, gráfico do PnL cumulativo e uma tabela com cada trade para inspeção/exportação.
 - Este backtest usa dados históricos até o momento da execução; não é streaming em tempo real.
 - A aba **Tempo real** lê arquivos `.flexbot_state/runtime.json` e `.flexbot_state/latest_backtest.json` que o bot atualiza automaticamente. Para vê-la viva, deixe `main_loop()` rodando (por exemplo: `.\start.ps1 -Action live`) enquanto o dashboard está aberto e clique em "Atualizar dados agora" quando quiser sincronizar.
