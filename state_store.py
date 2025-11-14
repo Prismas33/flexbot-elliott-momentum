@@ -4,10 +4,11 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 STATE_DIR = Path(".flexbot_state")
-STATE_DIR.mkdir(exist_ok=True)
+STATE_DIR.mkdir(parents=True, exist_ok=True)
 RUNTIME_FILE = STATE_DIR / "runtime.json"
 BACKTEST_FILE = STATE_DIR / "latest_backtest.json"
 CONFIG_FILE = STATE_DIR / "config.json"
+CONTROL_FILE = STATE_DIR / "control.json"
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, default=_json_default, ensure_ascii=False, indent=2))
@@ -78,3 +79,24 @@ def update_user_config(**kwargs: Any) -> Dict[str, Any]:
     config.update(({k: v for k, v in kwargs.items() if v is not None}))
     write_user_config(config)
     return config
+
+
+def read_control_state() -> Dict[str, Any]:
+    if not CONTROL_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CONTROL_FILE.read_text())
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        return {}
+    except OSError:
+        return {}
+    return {}
+
+
+def write_control_state(state: Dict[str, Any]) -> None:
+    if state:
+        CONTROL_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    elif CONTROL_FILE.exists():
+        CONTROL_FILE.unlink()

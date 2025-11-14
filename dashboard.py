@@ -1,4 +1,9 @@
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -14,7 +19,7 @@ from elliott_momentum_breakout_bot import (
     get_environment_mode,
     validate_symbol,
 )
-from state_store import read_user_config, update_user_config
+from state_store import read_user_config, update_user_config, read_control_state, write_control_state
 
 st.set_page_config(page_title="FlexBot Dashboard", layout="wide")
 
@@ -185,6 +190,49 @@ st.caption("Visualize resultados de backtests e acompanhe métricas do loop live
 STATE_DIR = Path('.flexbot_state')
 RUNTIME_FILE = STATE_DIR / 'runtime.json'
 BACKTEST_FILE = STATE_DIR / 'latest_backtest.json'
+ROOT_DIR = Path(__file__).resolve().parent
+
+
+def _pid_exists(pid: int) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def _terminate_pid(pid: int) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            result = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
+            return result.returncode == 0
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except FileNotFoundError:
+        return False
+    except PermissionError:
+        return False
+    except OSError:
+        return False
+    except Exception:
+        return False
 
 with st.sidebar:
     st.header("Parâmetros")
@@ -217,8 +265,12 @@ with st.sidebar:
         st.metric("Saldo estimado", f"${st.session_state['account_balance']:.2f}")
         st.caption("Valor estimado reportado pela corretora; se estiver em paper/fallback, o total padrão é $10.000.")
 
-    symbol = st.selectbox("Par", options=pairs, index=0)
-    timeframe = st.selectbox("Timeframe", options=timeframes, index=1)
+    default_symbol = config_data.get("symbol")
+    symbol_index = pairs.index(default_symbol) if isinstance(default_symbol, str) and default_symbol in pairs else 0
+    symbol = st.selectbox("Par", options=pairs, index=symbol_index)
+    default_timeframe = config_data.get("timeframe")
+    timeframe_index = timeframes.index(default_timeframe) if isinstance(default_timeframe, str) and default_timeframe in timeframes else 1
+    timeframe = st.selectbox("Timeframe", options=timeframes, index=timeframe_index)
     lookback_days = st.slider("Lookback (dias)", min_value=30, max_value=180, value=60, step=5)
     strategy = "ema_macd"
     strategy_display = "EMA + MACD"
@@ -251,11 +303,15 @@ with st.sidebar:
         help="Quando desmarcado, a confirmação EMA+MACD aceita sinais sem divergência RSI.",
     )
     if (
-        config_data.get("trade_bias") != trade_bias
+        config_data.get("symbol") != symbol
+        or config_data.get("timeframe") != timeframe
+        or config_data.get("trade_bias") != trade_bias
         or config_data.get("ema_cross_lookback") != cross_lookback
         or config_data.get("ema_require_divergence") != require_divergence
     ):
-        update_user_config(
+        config_data = update_user_config(
+            symbol=symbol,
+            timeframe=timeframe,
             trade_bias=trade_bias,
             ema_cross_lookback=cross_lookback,
             ema_require_divergence=require_divergence,
@@ -295,6 +351,147 @@ summary_html = f"""
 </div>
 """
 st.markdown(summary_html, unsafe_allow_html=True)
+
+control_state = read_control_state()
+if "bot_handle" not in st.session_state:
+    st.session_state["bot_handle"] = None
+if "bot_meta" not in st.session_state:
+    st.session_state["bot_meta"] = control_state if control_state else None
+
+handle = st.session_state.get("bot_handle")
+running_via_handle = handle is not None and handle.poll() is None
+running_via_pid = False
+if not running_via_handle and control_state.get("pid"):
+    running_via_pid = _pid_exists(control_state["pid"])
+    if running_via_pid and st.session_state.get("bot_meta") is None:
+        st.session_state["bot_meta"] = control_state
+
+if control_state and not (running_via_handle or running_via_pid):
+    control_state = {}
+    write_control_state({})
+
+is_loop_running = running_via_handle or running_via_pid
+active_meta = st.session_state.get("bot_meta") or control_state or {}
+
+st.markdown("<div class='card-section'>", unsafe_allow_html=True)
+st.subheader("Controle do loop live/paper")
+
+status_label = "Loop em execução" if is_loop_running else "Loop parado"
+status_badge = "live" if active_meta.get("environment") == "live" else "paper"
+status_badge_html = f"<span class='status-pill {status_badge}'>{status_label}</span>"
+st.markdown(status_badge_html, unsafe_allow_html=True)
+
+if is_loop_running:
+    started_at = active_meta.get("started_at")
+    started_str = time.strftime("%d/%m/%Y %H:%M:%S", time.localtime(started_at)) if started_at else "—"
+    symbol_running = active_meta.get("symbol", symbol)
+    timeframe_running = active_meta.get("timeframe", timeframe)
+    st.info(
+        f"Rodando para {symbol_running} @ {timeframe_running} · PID {active_meta.get('pid', '—')} · iniciado {started_str}"
+    )
+    if active_meta.get("command_line"):
+        st.code(active_meta["command_line"], language="bash")
+else:
+    st.caption("Nenhum processo ativo detectado. Inicie o loop para sincronizar métricas em tempo real.")
+
+start_col, stop_col = st.columns(2)
+
+with start_col:
+    start_clicked = st.button(
+        "🚀 Iniciar loop",
+        use_container_width=True,
+        disabled=is_loop_running,
+        key="start_loop_button",
+    )
+with stop_col:
+    stop_clicked = st.button(
+        "🛑 Parar loop",
+        use_container_width=True,
+        disabled=not is_loop_running,
+        key="stop_loop_button",
+    )
+
+loop_feedback = None
+if start_clicked:
+    command = [
+        sys.executable,
+        "elliott_momentum_breakout_bot.py",
+        "--live",
+        "--symbol",
+        symbol,
+        "--timeframe",
+        timeframe,
+        "--strategy",
+        strategy,
+        "--trade-bias",
+        trade_bias,
+        "--cross-lookback",
+        str(cross_lookback),
+    ]
+    command.append("--require-divergence" if require_divergence else "--allow-no-divergence")
+    command.append("--paper-mode" if env_choice == "paper" else "--no-paper")
+
+    try:
+        process = subprocess.Popen(command, cwd=ROOT_DIR)
+    except Exception as exc:
+        loop_feedback = ("error", f"Falha ao iniciar o loop: {exc}")
+    else:
+        started_meta = {
+            "pid": process.pid,
+            "symbol": symbol,
+            "symbols": [symbol],
+            "timeframe": timeframe,
+            "entry_timeframes": [timeframe],
+            "environment": env_choice,
+            "trade_bias": trade_bias,
+            "cross_lookback": cross_lookback,
+            "require_divergence": require_divergence,
+            "command": command,
+            "command_line": " ".join(command),
+            "started_at": time.time(),
+        }
+        st.session_state["bot_handle"] = process
+        st.session_state["bot_meta"] = started_meta
+        write_control_state(started_meta)
+        control_state = started_meta
+        is_loop_running = True
+        loop_feedback = ("success", "Loop principal iniciado; aguarde a primeira atualização do runtime.")
+
+if stop_clicked:
+    terminated = False
+    handle = st.session_state.get("bot_handle")
+    if handle and handle.poll() is None:
+        try:
+            handle.terminate()
+            handle.wait(timeout=10)
+            terminated = True
+        except subprocess.TimeoutExpired:
+            handle.kill()
+            terminated = True
+        except Exception:
+            terminated = False
+    if not terminated:
+        pid = active_meta.get("pid")
+        if pid:
+            terminated = _terminate_pid(pid)
+    if terminated:
+        st.session_state["bot_handle"] = None
+        st.session_state["bot_meta"] = None
+        write_control_state({})
+        control_state = {}
+        is_loop_running = False
+        loop_feedback = ("success", "Loop interrompido com sucesso.")
+    else:
+        loop_feedback = ("error", "Não foi possível encerrar o loop automaticamente. Finalize o processo manualmente.")
+
+if loop_feedback:
+    level, message = loop_feedback
+    if level == "success":
+        st.success(message)
+    else:
+        st.error(message)
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 @st.cache_data(show_spinner=False)
 def run_backtest(symbol: str, timeframe: str, lookback_days: int, strategy: str, bias: str, cross_lookback: int, require_divergence: bool):

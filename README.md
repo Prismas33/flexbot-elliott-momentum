@@ -73,6 +73,9 @@ Examples:
 # Run live real orders (⚠️ be careful!)
 .\start.ps1 -Action live -Symbol 'ETH/USDC:USDC' -NoPaper
 
+# Rodar loop live com todos os pares configurados
+python .\elliott_momentum_breakout_bot.py --live --all-pairs
+
 # Validar rapidamente se um par existe (CLI direto no bot)
 python .\elliott_momentum_breakout_bot.py --check-symbol 'ETH/USDC:USDC'
 
@@ -107,6 +110,9 @@ streamlit run dashboard.py
 - Quando quiser debugar sinais (especialmente shorts), rode com `-LogLevel DEBUG` (ou `--log-level DEBUG` no script Python) para ver os detalhes de rejeição nas regras.
 - A UI mostra métricas resumidas, gráfico do PnL cumulativo e uma tabela com cada trade para inspeção/exportação.
 - Este backtest usa dados históricos até o momento da execução; não é streaming em tempo real.
+- A aba **Tempo real** lê arquivos `.flexbot_state/runtime.json` e `.flexbot_state/latest_backtest.json` que o bot atualiza automaticamente. Para vê-la viva, deixe `main_loop()` rodando (por exemplo: `.\start.ps1 -Action live`) enquanto o dashboard está aberto e clique em "Atualizar dados agora" quando quiser sincronizar.
+- O card **Controle do loop live/paper** permite iniciar ou parar o `main_loop()` diretamente da interface, respeitando as seleções atuais de ambiente, bias, lookback e divergência.
+- Ao iniciar o loop pela interface, o bot executa somente o par/timeframe selecionado e impede múltiplas entradas na mesma vela; se quiser rodar outro par em paralelo, abra outro processo.
 - A aba **Tempo real** lê arquivos `.flexbot_state/runtime.json` e `.flexbot_state/latest_backtest.json` que o bot atualiza automaticamente. Para vê-la viva, deixe `main_loop()` rodando (por exemplo: `.\start.ps1 -Action live`) enquanto o dashboard está aberto e clique em "Atualizar dados agora" quando quiser sincronizar.
 - Sempre que alterar par/timeframe/lookback, clique novamente em "Executar backtest" para recalcular os gráficos com os novos parâmetros (o Streamlit reroda o app a cada interação).
 - Os backtests agora paginam os candles até ~5000 candles por timeframe. Se pedir janelas maiores (ex.: 5m por 180 dias) o sistema fará múltiplas requisições até preencher esse limite e mostrará na UI quantas velas conseguiu carregar.
