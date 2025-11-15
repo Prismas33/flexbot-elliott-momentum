@@ -16,19 +16,16 @@ INSTRUÇÕES RÁPIDAS
 Nota: testa em paper e faz backtests antes de usar capital real.
 """
 
-import os
 import sys
-import ccxt
 import argparse
 import time
 import logging
-from datetime import datetime
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import List, Optional
+
 import pandas as pd
 import numpy as np
-from ta.momentum import RSIIndicator
-from dotenv import load_dotenv
 
 from strategies.ema_macd_long import ema_macd_confirm_long
 from strategies.ema_macd_short import ema_macd_confirm_short
@@ -36,9 +33,45 @@ from strategies.ema_macd_short import ema_macd_confirm_short
 from state_store import (
     write_runtime_state,
     write_backtest_summary,
-    read_user_config,
     update_user_config,
 )
+
+from flexbot import bias, context, data, divergence, indicators, state
+from flexbot.risk import get_risk_multiplier, register_trade_outcome, loss_streaks
+from flexbot.strategies import analyze_momentum_and_maybe_trade, momentum_confirm
+
+
+ctx = context
+
+fetch_ohlcv = data.fetch_ohlcv
+fetch_ohlcv_paginated = data.fetch_ohlcv_paginated
+fetch_backtest_series = data.fetch_backtest_series
+timeframe_to_minutes = data.timeframe_to_minutes
+
+compute_rsi = indicators.compute_rsi
+compute_atr = indicators.compute_atr
+compute_macd = indicators.compute_macd
+find_turning_points = indicators.find_turning_points
+
+has_bullish_rsi_divergence = divergence.has_bullish_rsi_divergence
+has_bearish_rsi_divergence = divergence.has_bearish_rsi_divergence
+
+determine_trend_direction = bias.determine_trend_direction
+compute_symbol_bias = bias.compute_symbol_bias
+bias_allows_long = bias.bias_allows_long
+bias_allows_short = bias.bias_allows_short
+bias_from_slices = bias.bias_from_slices
+
+has_open_position = state.has_open_position
+serialize_open_positions = state.serialize_open_positions
+enter_position = state.enter_position
+monitor_and_close_positions = state.monitor_and_close_positions
+compute_size = state.compute_size
+compute_rr = state.compute_rr
+fetch_account_balance = state.fetch_account_balance
+get_environment_mode = state.get_environment_mode
+validate_symbol = state.validate_symbol
+reset_runtime_state = state.reset_runtime_state
 
 # Dependency check — helpful message if a module is missing
 try:
@@ -49,304 +82,25 @@ except ModuleNotFoundError as e:
     logging.error("Missing Python package: %s. Install dependencies with:\n  py -3 -m pip install -r requirements.txt\nOr: py -3 -m pip install ccxt pandas numpy ta", e.name)
     raise
 
-# Load environment variables (.env)
-load_dotenv()
-
-# ---------------- CONFIG ----------------
-API_KEY = os.getenv("API_KEY", "SUA_API_KEY")
-API_SECRET = os.getenv("API_SECRET", "SEU_API_SECRET")
-exchange_id = "bybit"
-paper = True                      # True = NÃO envia ordens reais
-default_risk_per_trade = 0.01     # 1% do capital por trade
-leverage = 5                      # alavancagem desejada (se aplicável)
-# timeframes and markets
-timeframes = ["5m", "15m", "1h", "4h", "1d"]
-pairs = [
-    "ETH/USDC:USDC",
-    "BTC/USDC:USDC",
-    "SOL/USDC:USDC"
-]
-entry_timeframes = list(timeframes)
-# simulation defaults
-simulation_base_capital = 100.0
-simulation_risk_per_trade = 0.10
-# timeframe helpers (minutes)
-tf_minutes_map = {
-    "1m": 1,
-    "5m": 5,
-    "15m": 15,
-    "1h": 60,
-    "4h": 240,
-    "1d": 1440,
-}
-tf_bias_parent = {
-    "5m": "15m",
-    "15m": "1h",
-    "1h": "4h",
-    "4h": "1d",
-    "1d": None,
-}
-# strategy toggles
-strategy_mode = "momentum"  # options: momentum, ema_macd
-trade_bias = "long"         # options: long, short, both
-momentum_stop_atr = 1.5
-momentum_tp_atr = 4.5  # garante 3R natural (tp/stop = 3)
-momentum_min_tf_agree = 1
-min_rr_required = 2.0
-ema_fast_period = 5
-ema_slow_period = 21
-ema_macd_fast = 26
-ema_macd_slow = 55
-ema_macd_signal = 9
-ema_macd_min_tf_agree = 1
-ema_macd_stop_atr = 1.8
-ema_macd_tp_atr = 5.4  # garante 3R natural (tp/stop = 3)
-ema_macd_cross_lookback = 8
-ema_macd_require_divergence = True
-# trend filter
-trend_fast_span = 20
-trend_slow_span = 50
-trend_flat_tolerance = 0.0005
-# analysis params
-lookback = 400                    # candles a buscar
-volume_ma_period = 20
-rsi_period = 14
-local_extrema_order = 6           # sensibilidade para detectar picos/vales (usado em divergências RSI)
-loop_interval_seconds = 30
-account_balance_fallback = 10000
-# trailing stop config
-use_trailing = False
-trailing_atr_multiplier = 1.5
-atr_period = 14
-# parciais e break-even
-take_partial_rr = 1.5           # realizar parcial a ~1.5R
-break_even_rr = 1.0             # mover SL para BE a 1R
-# backtest params
-backtest_min_hold_candles = 3
-max_backtest_candles_per_tf = 20000
-
-# bias override thresholds e gestão de risco
-momentum_bias_override_score = 3
-ema_macd_bias_override_score = 3
-loss_streak_limit = 2
-loss_streak_risk_factor = 0.5
-
-user_config = read_user_config()
-environment_mode = user_config.get("environment", "paper")
-if environment_mode not in ("paper", "live"):
-    environment_mode = "paper"
-paper = environment_mode != "live"
-
-config_trade_bias = user_config.get("trade_bias")
-if isinstance(config_trade_bias, str) and config_trade_bias in ("long", "short", "both"):
-    trade_bias = config_trade_bias
-
-config_cross_lb = user_config.get("ema_cross_lookback")
-if isinstance(config_cross_lb, int) and config_cross_lb > 0:
-    ema_macd_cross_lookback = config_cross_lb
-
-config_require_div = user_config.get("ema_require_divergence")
-if isinstance(config_require_div, bool):
-    ema_macd_require_divergence = config_require_div
-
-# ----------------------------------------
-
 # logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-# instantiate exchange
-exchange_class = getattr(ccxt, exchange_id)
-exchange = exchange_class({
-    "apiKey": API_KEY,
-    "secret": API_SECRET,
-    "enableRateLimit": True,
-    "options": {"defaultType": "future"},
-})
-try:
-    exchange.load_markets()
-except Exception as e:
-    logging.warning("load_markets falhou: %s", e)
-
-if paper:
-    logging.info("MODO PAPER ATIVO — ordens reais NÃO serão colocadas.")
-
-if API_KEY in (None, "", "SUA_API_KEY") or API_SECRET in (None, "", "SEU_API_SECRET"):
-    logging.warning("API_KEY/API_SECRET não definidos. Configure variáveis de ambiente ou .env antes de usar --no-paper.")
-
-# ---------- Helpers ----------
-
-def fetch_ohlcv(symbol, timeframe, limit=200):
-    try:
-        raw = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    except Exception as e:
-        logging.error("Erro fetch_ohlcv %s %s: %s", symbol, timeframe, e)
-        return None
-    df = pd.DataFrame(raw, columns=['ts','open','high','low','close','volume'])
-    df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-    df.set_index('ts', inplace=True)
-    return df
-
-def fetch_ohlcv_paginated(symbol, timeframe, bars_needed):
-    try:
-        tf_ms = int(exchange.parse_timeframe(timeframe) * 1000)
-    except Exception:
-        tf_ms = 60_000
-    since = max(0, exchange.milliseconds() - (bars_needed + 5) * tf_ms)
-    all_rows = []
-    attempts = 0
-    while len(all_rows) < bars_needed and attempts < 50:
-        limit = min(1000, bars_needed - len(all_rows))
-        try:
-            batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
-        except Exception as e:
-            logging.error("Erro fetch_ohlcv_paginated %s %s: %s", symbol, timeframe, e)
-            break
-        if not batch:
-            break
-        all_rows.extend(batch)
-        last_ts = batch[-1][0]
-        since = last_ts + tf_ms
-        attempts += 1
-        if len(batch) < limit:
-            break
-    if not all_rows:
-        return None
-    df = pd.DataFrame(all_rows, columns=['ts','open','high','low','close','volume'])
-    df.drop_duplicates(subset='ts', inplace=True)
-    df.sort_values('ts', inplace=True)
-    df = df.tail(bars_needed)
-    df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-    df.set_index('ts', inplace=True)
-    return df
-
-def fetch_backtest_series(symbol, timeframe, candles_needed):
-    candles_needed = min(candles_needed, max_backtest_candles_per_tf)
-    df = fetch_ohlcv_paginated(symbol, timeframe, candles_needed)
-    if df is None or df.empty:
-        return None, {
-            "candles": 0,
-            "start": None,
-            "end": None,
-            "requested": candles_needed,
-        }
-    start_ts = df.index[0]
-    end_ts = df.index[-1]
-    return df, {
-        "candles": len(df),
-        "start": start_ts.isoformat(),
-        "end": end_ts.isoformat(),
-        "requested": candles_needed,
-    }
-
-def timeframe_to_minutes(tf):
-    if tf in tf_minutes_map:
-        return tf_minutes_map[tf]
-    try:
-        seconds = exchange.parse_timeframe(tf)
-        return max(1, int(seconds / 60))
-    except Exception:
-        raise ValueError(f"Timeframe não suportado: {tf}")
-
-def compute_rsi(df, period=14):
-    return RSIIndicator(df['close'], period).rsi()
-
-def compute_atr(df, period=14):
-    high = df['high']
-    low = df['low']
-    close = df['close']
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(period, min_periods=1).mean()
-    return atr
-
-def compute_macd(series, fast=12, slow=26, signal=9):
-    ema_fast = series.ewm(span=fast, adjust=False).mean()
-    ema_slow = series.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line, signal_line, histogram
-
-def is_local_max(series, idx, order):
-    start = max(0, idx - order)
-    end = min(len(series)-1, idx + order)
-    center = series.iloc[idx]
-    window = series.iloc[start:end+1]
-    return center >= window.max()
-
-def is_local_min(series, idx, order):
-    start = max(0, idx - order)
-    end = min(len(series)-1, idx + order)
-    center = series.iloc[idx]
-    window = series.iloc[start:end+1]
-    return center <= window.min()
-
-def find_turning_points(df_close, order=5):
-    pts = []
-    n = len(df_close)
-    for i in range(order, n-order):
-        if is_local_max(df_close, i, order):
-            pts.append((i, 'max'))
-        elif is_local_min(df_close, i, order):
-            pts.append((i, 'min'))
-    return pts
+exchange = ctx.exchange
+exchange_id = ctx.exchange_id
 
 # ---------- Momentum & Breakout filters ----------
-def momentum_confirm(df):
-    if df is None or len(df) < 50:
-        return False, {}
-    df = df.copy()
-    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-    df['atr'] = compute_atr(df, atr_period)
-    df['vol_ma'] = df['volume'].rolling(volume_ma_period, min_periods=1).mean()
-    df['rsi'] = compute_rsi(df, rsi_period)
-
-    ema_cross = df['ema20'].iloc[-1] > df['ema50'].iloc[-1]
-    atr_expansion = df['atr'].iloc[-1] > df['atr'].iloc[-5:].mean() * 1.05
-    vol_spike = df['volume'].iloc[-1] > df['vol_ma'].iloc[-1] * 1.1
-
-    # evitar entradas com RSI extremamente sobrecomprado
-    rsi_val = float(df['rsi'].iloc[-1]) if not np.isnan(df['rsi'].iloc[-1]) else None
-    rsi_ok = True
-    if rsi_val is not None and rsi_val > 80:
-        rsi_ok = False
-
-    # score ponderado
-    score = 0
-    if ema_cross:
-        score += 1.5
-    if atr_expansion:
-        score += 1
-    if vol_spike:
-        score += 0.5
-
-    confirmed = (score >= 1.5) and rsi_ok
-    return confirmed, {
-        "ema_cross": ema_cross,
-        "atr_expansion": atr_expansion,
-        "vol_spike": vol_spike,
-        "score": score,
-        "atr": df['atr'].iloc[-1],
-        "last_close": df['close'].iloc[-1],
-        "rsi": rsi_val,
-        "rsi_ok": rsi_ok,
-    }
-
 def ema_macd_confirm(df, cross_lookback=None, require_divergence=None):
-    cross_lb = cross_lookback if cross_lookback is not None else ema_macd_cross_lookback
-    divergence_required = ema_macd_require_divergence if require_divergence is None else require_divergence
+    cross_lb = cross_lookback if cross_lookback is not None else ctx.ema_macd_cross_lookback
+    divergence_required = ctx.ema_macd_require_divergence if require_divergence is None else require_divergence
     return ema_macd_confirm_long(
         df,
-        ema_fast_period=ema_fast_period,
-        ema_slow_period=ema_slow_period,
-        ema_macd_fast=ema_macd_fast,
-        ema_macd_slow=ema_macd_slow,
-        ema_macd_signal=ema_macd_signal,
-        atr_period=atr_period,
-        rsi_period=rsi_period,
+        ema_fast_period=ctx.ema_fast_period,
+        ema_slow_period=ctx.ema_slow_period,
+        ema_macd_fast=ctx.ema_macd_fast,
+        ema_macd_slow=ctx.ema_macd_slow,
+        ema_macd_signal=ctx.ema_macd_signal,
+        atr_period=ctx.atr_period,
+        rsi_period=ctx.rsi_period,
         compute_atr=compute_atr,
         compute_rsi=compute_rsi,
         compute_macd=compute_macd,
@@ -355,502 +109,7 @@ def ema_macd_confirm(df, cross_lookback=None, require_divergence=None):
         require_divergence=divergence_required,
     )
 
-# ---------- Position sizing ----------
-def fetch_account_balance():
-    try:
-        bal = exchange.fetch_balance(params={"type":"future"})
-        if isinstance(bal, dict):
-            totals = bal.get('total', {})
-            for cur in ['USDC','USD','USDT']:
-                if cur in totals and totals[cur] is not None:
-                    return float(totals[cur])
-    except Exception as e:
-        logging.warning("fetch_balance falhou: %s", e)
-    return account_balance_fallback
-
-
-def get_environment_mode():
-    return "paper" if paper else "live"
-
-
-def validate_symbol(symbol):
-    try:
-        markets = exchange.markets or {}
-        if not markets:
-            markets = exchange.load_markets()
-        return symbol in markets
-    except Exception as exc:
-        logging.error("Falha ao validar par %s: %s", symbol, exc)
-        return False
-
-def compute_size(account_balance, entry_price, stop_price, risk_per_trade=default_risk_per_trade):
-    risk_amount = account_balance * risk_per_trade
-    risk_per_unit = abs(entry_price - stop_price)
-    if risk_per_unit == 0:
-        return 0
-    qty = risk_amount / risk_per_unit
-    return max(0, qty)
-
-def compute_rr(entry_price, stop_price, tp_price, side='buy'):
-    if side == 'buy':
-        risk = entry_price - stop_price
-        reward = tp_price - entry_price
-    else:
-        risk = stop_price - entry_price
-        reward = entry_price - tp_price
-    if risk <= 0 or reward <= 0:
-        return None
-    return reward / risk
-
-
-def set_entry_timeframes(allowed: Optional[List[str]] = None) -> None:
-    global entry_timeframes
-    if not allowed:
-        entry_timeframes = list(timeframes)
-        return
-    unique: List[str] = []
-    for tf in allowed:
-        if tf in timeframes and tf not in unique:
-            unique.append(tf)
-    entry_timeframes = unique if unique else list(timeframes)
-
-# ------- Risk adaptive helpers -------
-loss_streaks = defaultdict(int)
-
-def _loss_key(symbol, strategy):
-    return (symbol, strategy)
-
-def get_risk_multiplier(symbol, strategy, store=None):
-    book = store if store is not None else loss_streaks
-    key = _loss_key(symbol, strategy)
-    streak = book[key]
-    if streak >= loss_streak_limit:
-        return loss_streak_risk_factor
-    return 1.0
-
-def register_trade_outcome(symbol, strategy, outcome, store=None):
-    book = store if store is not None else loss_streaks
-    key = _loss_key(symbol, strategy)
-    if outcome == "loss":
-        book[key] += 1
-    else:
-        book[key] = 0
-    return book[key]
-
-def has_bullish_rsi_divergence(df, order=None):
-    if df is None or len(df) < 40:
-        return False
-    order = order or local_extrema_order
-    close = df['close']
-    rsi = compute_rsi(df, rsi_period)
-    if rsi.isna().all():
-        return False
-    pts = find_turning_points(close, order=order)
-    lows = [idx for idx, typ in pts if typ == 'min']
-    if len(lows) < 2:
-        return False
-    idx1, idx2 = lows[-2], lows[-1]
-    # exigir minimo 8 candles entre os dois minimos
-    if (idx2 - idx1) < 8:
-        return False
-    price1 = close.iloc[idx1]
-    price2 = close.iloc[idx2]
-    rsi1 = rsi.iloc[idx1]
-    rsi2 = rsi.iloc[idx2]
-    if np.isnan(price1) or np.isnan(price2) or np.isnan(rsi1) or np.isnan(rsi2):
-        return False
-    # exigir drop minimo de 1.5% no preco
-    price_drop_pct = abs(price2 - price1) / price1
-    if price_drop_pct < 0.015:
-        return False
-    return price2 < price1 and rsi2 > rsi1
-
-def has_bearish_rsi_divergence(df, order=None):
-    if df is None or len(df) < 40:
-        return False
-    order = order or local_extrema_order
-    close = df['close']
-    rsi = compute_rsi(df, rsi_period)
-    if rsi.isna().all():
-        return False
-    pts = find_turning_points(close, order=order)
-    highs = [idx for idx, typ in pts if typ == 'max']
-    if len(highs) < 2:
-        return False
-    idx1, idx2 = highs[-2], highs[-1]
-    if (idx2 - idx1) < 8:
-        return False
-    price1 = close.iloc[idx1]
-    price2 = close.iloc[idx2]
-    rsi1 = rsi.iloc[idx1]
-    rsi2 = rsi.iloc[idx2]
-    if np.isnan(price1) or np.isnan(price2) or np.isnan(rsi1) or np.isnan(rsi2):
-        return False
-    price_push_pct = abs(price2 - price1) / price1
-    if price_push_pct < 0.015:
-        return False
-    return price2 > price1 and rsi2 < rsi1
-
-def determine_trend_direction(df, fast=trend_fast_span, slow=trend_slow_span):
-    if df is None or len(df) < slow + 5:
-        return "unknown"
-    ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
-    ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
-    diff = ema_fast.iloc[-1] - ema_slow.iloc[-1]
-    if diff > trend_flat_tolerance:
-        return "up"
-    if diff < -trend_flat_tolerance:
-        return "down"
-    return "flat"
-
-def compute_symbol_bias(symbol):
-    bias = {}
-    parent_cache = {}
-    for tf in timeframes:
-        parent = tf_bias_parent.get(tf)
-        if parent is None:
-            bias[tf] = "both"
-            continue
-        if parent not in parent_cache:
-            parent_cache[parent] = fetch_ohlcv(symbol, parent, limit=lookback)
-        bias[tf] = determine_trend_direction(parent_cache[parent])
-    return bias
-
-def bias_allows_long(tf, bias_map):
-    direction = bias_map.get(tf, "both")
-    return direction != "down"
-
-def bias_allows_short(tf, bias_map):
-    direction = bias_map.get(tf, "both")
-    return direction != "up"
-
-def bias_from_slices(tf, ts, slice_store):
-    parent = tf_bias_parent.get(tf)
-    if parent is None:
-        return "both"
-    parent_df = slice_store.get(parent)
-    if parent_df is None or parent_df.empty:
-        return "unknown"
-    df = parent_df[parent_df.index <= ts].tail(lookback)
-    if df is None or df.empty:
-        return "unknown"
-    return determine_trend_direction(df)
-
-# ---------- Order helpers (paper fallback) ----------
-def place_market_order(symbol, side, qty):
-    logging.info("ORDER MARKET %s %s %s", side, qty, symbol)
-    if paper:
-        return {"id": f"paper-{int(time.time())}", "symbol": symbol, "side": side, "qty": qty, "status": "paper", "price": None}
-    try:
-        order = exchange.create_market_order(symbol, side.lower(), qty)
-        return order
-    except Exception as e:
-        logging.error("Erro colocar market order: %s", e)
-        return None
-
-def place_conditional_orders(symbol, side, qty, stop_price, tp_price):
-    # Try to create conditional SL/TP (may vary by CCXT version). If fails, return False to rely on monitor fallback.
-    if paper:
-        logging.info("PAPER: criar ordens condicionais (simuladas) for %s", symbol)
-        return True
-    try:
-        params_sl = {"stopPrice": stop_price, "reduceOnly": True, "closeOnTrigger": True}
-        params_tp = {"stopPrice": tp_price, "reduceOnly": True, "closeOnTrigger": True}
-        exchange.create_order(symbol, 'stop', 'sell' if side=='buy' else 'buy', qty, None, params_sl)
-        exchange.create_order(symbol, 'stop', 'sell' if side=='buy' else 'buy', qty, None, params_tp)
-        return True
-    except Exception as e:
-        logging.warning("Falha ordens condicionais: %s", e)
-        return False
-
-# ---------- Execution logic: partial entry + add-on on retest ----------
-# tracking paper/trades for fallback
-open_positions = []  # list of dicts
-last_entry_tracker: Dict[Tuple[str, str, str], pd.Timestamp] = {}
-
-
-def has_open_position(symbol: str) -> bool:
-    for pos in open_positions:
-        if pos.get("symbol") == symbol and (pos.get("qty_current") or 0) > 0:
-            return True
-    return False
-
-def serialize_open_positions():
-    serialized = []
-    for pos in open_positions:
-        serialized.append({
-            "symbol": pos.get("symbol"),
-            "side": pos.get("side"),
-            "qty_current": pos.get("qty_current"),
-            "qty_total": pos.get("qty_total"),
-            "entry_price": pos.get("entry_price"),
-            "stop": pos.get("stop"),
-            "tp": pos.get("tp"),
-            "opened_at": pos.get("opened_at").isoformat() if pos.get("opened_at") else None,
-            "addon_pending": pos.get("addon_pending"),
-            "strategy": pos.get("strategy", "unknown"),
-            "partial_taken": pos.get("partial_taken", False),
-            "breakeven_moved": pos.get("breakeven_moved", False),
-            "risk_multiplier": pos.get("risk_multiplier", 1.0),
-            "timeframe": pos.get("timeframe"),
-        })
-    return serialized
-
-def enter_position(symbol, entry_price, stop_price, tp_price, account_balance, *, side, strategy_label, risk_multiplier=1.0, bar_time=None, timeframe=None):
-    if has_open_position(symbol):
-        logging.info("%s trade ignorado — já existe posição aberta em %s", strategy_label, symbol)
-        return None
-    if bar_time is not None and timeframe is not None:
-        key = (symbol, strategy_label, timeframe)
-        last_bar = last_entry_tracker.get(key)
-        if last_bar is not None and bar_time <= last_bar:
-            logging.info(
-                "%s trade ignorado — já foi executado nesta vela (%s @ %s)",
-                strategy_label,
-                symbol,
-                bar_time,
-            )
-            return None
-    risk_per_trade = max(default_risk_per_trade * risk_multiplier, default_risk_per_trade * 0.25)
-    qty = compute_size(account_balance, entry_price, stop_price, risk_per_trade)
-    qty = max(0, qty)
-    if qty == 0:
-        logging.info("%s trade abortado — qty=0", strategy_label)
-        return None
-    order = place_market_order(symbol, 'buy' if side == 'buy' else 'sell', qty)
-    if order is None:
-        return None
-    pos = {
-        "symbol": symbol,
-        "side": side,
-        "entry_price": entry_price,
-        "qty_total": qty,
-        "qty_partial": qty,
-        "qty_addon": 0,
-        "qty_current": qty,
-        "stop": stop_price,
-        "tp": tp_price,
-        "opened_at": datetime.utcnow(),
-        "addon_pending": False,
-        "strategy": strategy_label,
-        "partial_taken": False,
-        "breakeven_moved": False,
-        "risk_multiplier": risk_multiplier,
-        "timeframe": timeframe,
-    }
-    open_positions.append(pos)
-    place_conditional_orders(symbol, side, qty, stop_price, tp_price)
-    if bar_time is not None and timeframe is not None:
-        last_entry_tracker[(symbol, strategy_label, timeframe)] = bar_time
-    return pos
-
-def monitor_and_close_positions(open_positions):
-    closed = []
-    for pos in list(open_positions):
-        df = fetch_ohlcv(pos['symbol'], '1m', limit=10)
-        if df is None or df.empty:
-            continue
-        high = df['high'].max()
-        low = df['low'].min()
-
-        entry = pos['entry_price']
-        stop = pos['stop']
-        tp = pos['tp']
-
-        # calcular R atual
-        if stop is not None and tp is not None and entry is not None:
-            risk_per_unit = entry - stop if pos['side'] == 'buy' else stop - entry
-            if risk_per_unit > 0:
-                # preco max/min desde que a posicao foi aberta (aqui, janela reduzida)
-                if pos['side'] == 'buy':
-                    max_price = high
-                    rr_reached = (max_price - entry) / risk_per_unit
-                else:
-                    min_price = low
-                    rr_reached = (entry - min_price) / risk_per_unit
-            else:
-                rr_reached = 0
-        else:
-            rr_reached = 0
-
-        # mover SL para break-even a 1R
-        if (not pos.get('breakeven_moved', False)) and rr_reached >= break_even_rr and entry is not None:
-            pos['stop'] = entry
-            pos['breakeven_moved'] = True
-            logging.info("Move SL para break-even em %s (%.2fR)", pos['symbol'], rr_reached)
-
-        # parcial a 1.5R: fechar metade da posicao (se ainda nao feito)
-        if (not pos.get('partial_taken', False)) and rr_reached >= take_partial_rr:
-            qty_close = pos['qty_current'] * 0.5
-            if qty_close > 0:
-                side = 'sell' if pos['side'] == 'buy' else 'buy'
-                if paper:
-                    logging.info("PAPER: parcial em %s, fechar %.6f", pos['symbol'], qty_close)
-                    pos['qty_current'] -= qty_close
-                    pos['partial_taken'] = True
-                else:
-                    try:
-                        close_order = exchange.create_market_order(pos['symbol'], side, qty_close)
-                        logging.info("Parcial fechada %s: %s", pos['symbol'], close_order)
-                        pos['qty_current'] -= qty_close
-                        pos['partial_taken'] = True
-                    except Exception as e:
-                        logging.error("Erro fechar parcial em %s: %s", pos['symbol'], e)
-
-        # TP/SL final para o restante
-        if pos['side'] == 'buy':
-            hit_tp = (tp is not None) and (high >= tp)
-            hit_sl = (stop is not None) and (low <= stop)
-        else:
-            hit_tp = (tp is not None) and (low <= tp)
-            hit_sl = (stop is not None) and (high >= stop)
-        if hit_tp or hit_sl:
-            side = 'sell' if pos['side'] == 'buy' else 'buy'
-            qty = pos['qty_current']
-            if qty <= 0:
-                outcome_label = "breakeven"
-                register_trade_outcome(pos['symbol'], pos.get('strategy', 'unknown'), outcome_label)
-                closed.append(pos)
-                open_positions.remove(pos)
-                continue
-            outcome_label = None
-            if hit_tp and hit_sl:
-                ref_open = df['open'].iloc[-1]
-                dist_tp = abs((tp or ref_open) - ref_open)
-                dist_sl = abs((stop or ref_open) - ref_open)
-                outcome_label = "win" if dist_tp <= dist_sl else "loss"
-            elif hit_tp:
-                outcome_label = "win"
-            elif hit_sl:
-                if pos.get('breakeven_moved') and entry is not None and stop is not None and abs(stop - entry) <= max(1e-6, entry * 0.0001):
-                    outcome_label = "breakeven"
-                else:
-                    outcome_label = "loss"
-            else:
-                outcome_label = "breakeven"
-            streak = register_trade_outcome(pos['symbol'], pos.get('strategy', 'unknown'), outcome_label)
-            if outcome_label == "loss" and streak >= loss_streak_limit:
-                logging.info("Loss streak %d em %s (%s) — reduzir risco para %.2f%%", streak, pos['symbol'], pos.get('strategy', 'unknown'), default_risk_per_trade * loss_streak_risk_factor * 100)
-            if paper:
-                logging.info("PAPER: fechar pos %s por %s (tp/sl atingido).", pos['symbol'], 'TP' if hit_tp else 'SL')
-                closed.append(pos)
-                open_positions.remove(pos)
-            else:
-                try:
-                    close_order = exchange.create_market_order(pos['symbol'], side, qty)
-                    logging.info("Fechada pos %s: %s", pos['symbol'], close_order)
-                    closed.append(pos)
-                    open_positions.remove(pos)
-                except Exception as e:
-                    logging.error("Erro fechar pos %s: %s", pos['symbol'], e)
-    return closed
-
 # ---------- Live analyze & execute ----------
-def analyze_momentum_and_maybe_trade(symbol):
-    summary = {
-        "symbol": symbol,
-        "status": "ok",
-        "strategy": "momentum",
-        "should_enter": False,
-        "reference_tf": None,
-        "score": None,
-    }
-    if trade_bias == "short":
-        summary["status"] = "bias_not_supported"
-        summary["note"] = "Momentum strategy opera apenas comprado."
-        return None, summary
-    bias_map = compute_symbol_bias(symbol)
-    summary["bias"] = bias_map
-    confirmations = {}
-    allowed_entry_tfs = entry_timeframes if entry_timeframes else list(timeframes)
-    core_tfs = tuple(allowed_entry_tfs) if allowed_entry_tfs else ("15m", "1h")
-    for tf in timeframes:
-        bias_dir = bias_map.get(tf, "both")
-        df = fetch_ohlcv(symbol, tf, limit=lookback)
-        if df is None or len(df) < 50:
-            confirmations[tf] = {"confirmed": False}
-            continue
-        # divergencia RSI agora e opcional: da bonus ao score mas nao bloqueia
-        has_div = has_bullish_rsi_divergence(df)
-
-        confirmed, details = momentum_confirm(df)
-        # bonus de score se tiver divergencia
-        if has_div and confirmed:
-            details["score"] = details.get("score", 0) + 1
-        if bias_dir == "down" and confirmed and details.get("score", 0) < momentum_bias_override_score:
-            confirmations[tf] = {"confirmed": False, "bias_blocked": True}
-            continue
-        confirmations[tf] = {
-            "confirmed": confirmed,
-            "details": details,
-            "price": details.get("last_close"),
-            "atr": details.get("atr"),
-            "bias": bias_dir,
-            "bar_time": df.index[-1] if len(df.index) else None,
-        }
-    summary["signals"] = {tf: data["confirmed"] for tf, data in confirmations.items()}
-    ready = [
-        (tf, data)
-        for tf, data in confirmations.items()
-        if data.get("confirmed") and data.get("details") and (not allowed_entry_tfs or tf in allowed_entry_tfs)
-    ]
-    required = min(momentum_min_tf_agree, len(ready))
-    if len(ready) < max(1, required):
-        return None, summary
-    # dar prioridade a TFs core com melhor score
-    ready.sort(key=lambda item: (
-        1 if item[0] in core_tfs else 0,
-        item[1]["details"].get("score", 0)
-    ), reverse=True)
-    ref_tf, ref_data = ready[0]
-    summary["reference_tf"] = ref_tf
-    summary["score"] = ref_data["details"].get("score")
-    entry_price = ref_data["price"]
-    atr_val = ref_data.get("atr") or 0
-    if atr_val == 0:
-        summary["status"] = "no_atr"
-        return None, summary
-    stop_price = entry_price - atr_val * momentum_stop_atr
-    tp_price = entry_price + atr_val * momentum_tp_atr
-    rr = compute_rr(entry_price, stop_price, tp_price)
-    summary["rr"] = rr
-    if rr is None or rr < min_rr_required:
-        summary["status"] = "min_rr_not_met"
-        return None, summary
-    account_balance = fetch_account_balance()
-    risk_mult = get_risk_multiplier(symbol, "momentum_long")
-    if risk_mult < 1.0:
-        streak = loss_streaks[_loss_key(symbol, "momentum_long")]
-        logging.info("Risco reduzido em %s (Momentum) — streak=%d risco=%.2f%%", symbol, streak, default_risk_per_trade * risk_mult * 100)
-    if has_open_position(symbol):
-        summary["status"] = "position_open"
-        summary["note"] = "Já existe posição aberta; aguardando encerramento antes de novo trade."
-        return None, summary
-    bar_time = ref_data.get("bar_time")
-    key = (symbol, "momentum_long", ref_tf)
-    if bar_time is not None:
-        last_bar = last_entry_tracker.get(key)
-        if last_bar is not None and bar_time <= last_bar:
-            summary["status"] = "already_traded_bar"
-            summary["note"] = f"Entrada já executada na vela {bar_time}."
-            return None, summary
-    pos = enter_position(
-        symbol,
-        entry_price,
-        stop_price,
-        tp_price,
-        account_balance,
-        side='buy',
-        strategy_label="momentum_long",
-        risk_multiplier=risk_mult,
-        bar_time=ref_data.get("bar_time"),
-        timeframe=ref_tf,
-    )
-    summary["should_enter"] = pos is not None
-    summary["entry_price"] = entry_price
-    summary["direction"] = "long"
-    return pos, summary
-
 def analyze_ema_macd_and_maybe_trade(symbol):
     summary = {
         "symbol": symbol,
@@ -863,23 +122,23 @@ def analyze_ema_macd_and_maybe_trade(symbol):
     bias_map = compute_symbol_bias(symbol)
     summary["bias"] = bias_map
     confirmations = {}
-    allowed_entry_tfs = entry_timeframes if entry_timeframes else list(timeframes)
-    for tf in timeframes:
+    allowed_entry_tfs = ctx.entry_timeframes if ctx.entry_timeframes else list(ctx.timeframes)
+    for tf in ctx.timeframes:
         bias_dir = bias_map.get(tf, "both")
-        df = fetch_ohlcv(symbol, tf, limit=lookback)
+        df = fetch_ohlcv(symbol, tf, limit=ctx.lookback)
         tf_entry = {"bias": bias_dir}
-        if df is None or len(df) < ema_slow_period + 10:
+        if df is None or len(df) < ctx.ema_slow_period + 10:
             tf_entry["long"] = {"confirmed": False, "bias": bias_dir}
             tf_entry["short"] = {"confirmed": False, "bias": bias_dir}
             confirmations[tf] = tf_entry
             continue
         current_bar = df.index[-1] if len(df.index) else None
 
-        if trade_bias in ("long", "both"):
+        if ctx.trade_bias in ("long", "both"):
             confirmed_long, details_long = ema_macd_confirm(
                 df,
-                cross_lookback=ema_macd_cross_lookback,
-                require_divergence=ema_macd_require_divergence,
+                cross_lookback=ctx.ema_macd_cross_lookback,
+                require_divergence=ctx.ema_macd_require_divergence,
             )
             long_info = {
                 "confirmed": confirmed_long,
@@ -889,29 +148,29 @@ def analyze_ema_macd_and_maybe_trade(symbol):
                 "bias": bias_dir,
                 "bar_time": current_bar,
             }
-            if confirmed_long and not bias_allows_long(tf, bias_map) and details_long.get("score", 0) < ema_macd_bias_override_score:
+            if confirmed_long and not bias_allows_long(tf, bias_map) and details_long.get("score", 0) < ctx.ema_macd_bias_override_score:
                 long_info["confirmed"] = False
                 long_info["bias_blocked"] = True
             tf_entry["long"] = long_info
         else:
             tf_entry["long"] = {"confirmed": False, "bias": bias_dir}
 
-        if trade_bias in ("short", "both"):
+        if ctx.trade_bias in ("short", "both"):
             confirmed_short, details_short = ema_macd_confirm_short(
                 df,
-                ema_fast_period=ema_fast_period,
-                ema_slow_period=ema_slow_period,
-                ema_macd_fast=ema_macd_fast,
-                ema_macd_slow=ema_macd_slow,
-                ema_macd_signal=ema_macd_signal,
-                atr_period=atr_period,
-                rsi_period=rsi_period,
+                ema_fast_period=ctx.ema_fast_period,
+                ema_slow_period=ctx.ema_slow_period,
+                ema_macd_fast=ctx.ema_macd_fast,
+                ema_macd_slow=ctx.ema_macd_slow,
+                ema_macd_signal=ctx.ema_macd_signal,
+                atr_period=ctx.atr_period,
+                rsi_period=ctx.rsi_period,
                 compute_atr=compute_atr,
                 compute_rsi=compute_rsi,
                 compute_macd=compute_macd,
                 has_bearish_rsi_divergence=has_bearish_rsi_divergence,
-                cross_lookback=ema_macd_cross_lookback,
-                require_divergence=ema_macd_require_divergence,
+                cross_lookback=ctx.ema_macd_cross_lookback,
+                require_divergence=ctx.ema_macd_require_divergence,
             )
             if not confirmed_short and logging.getLogger().isEnabledFor(logging.DEBUG):
                 logging.debug(
@@ -928,7 +187,7 @@ def analyze_ema_macd_and_maybe_trade(symbol):
                 "bias": bias_dir,
                 "bar_time": current_bar,
             }
-            if confirmed_short and not bias_allows_short(tf, bias_map) and details_short.get("score", 0) < ema_macd_bias_override_score:
+            if confirmed_short and not bias_allows_short(tf, bias_map) and details_short.get("score", 0) < ctx.ema_macd_bias_override_score:
                 short_info["confirmed"] = False
                 short_info["bias_blocked"] = True
             tf_entry["short"] = short_info
@@ -944,7 +203,7 @@ def analyze_ema_macd_and_maybe_trade(symbol):
         for tf, data in confirmations.items()
     }
     candidates = []
-    if trade_bias in ("long", "both"):
+    if ctx.trade_bias in ("long", "both"):
         long_ready = [
             (tf, data.get("long"))
             for tf, data in confirmations.items()
@@ -956,8 +215,8 @@ def analyze_ema_macd_and_maybe_trade(symbol):
             entry_price = ref_data.get("price")
             atr_val = ref_data.get("atr") or 0
             if entry_price is not None and atr_val > 0:
-                stop_price = entry_price - atr_val * ema_macd_stop_atr
-                tp_price = entry_price + atr_val * ema_macd_tp_atr
+                stop_price = entry_price - atr_val * ctx.ema_macd_stop_atr
+                tp_price = entry_price + atr_val * ctx.ema_macd_tp_atr
                 rr = compute_rr(entry_price, stop_price, tp_price, side='buy')
                 candidates.append({
                     "tf": ref_tf,
@@ -974,7 +233,7 @@ def analyze_ema_macd_and_maybe_trade(symbol):
                     "bar_time": ref_data.get("bar_time"),
                 })
 
-    if trade_bias in ("short", "both"):
+    if ctx.trade_bias in ("short", "both"):
         short_ready = [
             (tf, data.get("short"))
             for tf, data in confirmations.items()
@@ -986,8 +245,8 @@ def analyze_ema_macd_and_maybe_trade(symbol):
             entry_price = ref_data.get("price")
             atr_val = ref_data.get("atr") or 0
             if entry_price is not None and atr_val > 0:
-                stop_price = entry_price + atr_val * ema_macd_stop_atr
-                tp_price = entry_price - atr_val * ema_macd_tp_atr
+                stop_price = entry_price + atr_val * ctx.ema_macd_stop_atr
+                tp_price = entry_price - atr_val * ctx.ema_macd_tp_atr
                 rr = compute_rr(entry_price, stop_price, tp_price, side='sell')
                 candidates.append({
                     "tf": ref_tf,
@@ -1008,7 +267,7 @@ def analyze_ema_macd_and_maybe_trade(symbol):
         summary["status"] = "no_confirmed"
         return None, summary
 
-    valid_candidates = [c for c in candidates if c.get("rr") is not None and c.get("rr") >= min_rr_required]
+    valid_candidates = [c for c in candidates if c.get("rr") is not None and c.get("rr") >= ctx.min_rr_required]
     if not valid_candidates:
         summary["status"] = "min_rr_not_met"
         summary["rr"] = max((c.get("rr") or 0) for c in candidates)
@@ -1032,7 +291,7 @@ def analyze_ema_macd_and_maybe_trade(symbol):
     tf_key = selected.get("tf")
     risk_key = selected["risk_key"]
     if bar_time is not None and tf_key is not None:
-        last_bar = last_entry_tracker.get((symbol, risk_key, tf_key))
+        last_bar = state.last_entry_tracker.get((symbol, risk_key, tf_key))
         if last_bar is not None and bar_time <= last_bar:
             summary["status"] = "already_traded_bar"
             summary["note"] = f"Entrada já executada na vela {bar_time}."
@@ -1041,13 +300,14 @@ def analyze_ema_macd_and_maybe_trade(symbol):
     account_balance = fetch_account_balance()
     risk_mult = get_risk_multiplier(symbol, selected["risk_key"])
     if risk_mult < 1.0:
-        streak = loss_streaks[_loss_key(symbol, selected["risk_key"])]
+        streak = loss_streaks[(symbol, selected["risk_key"])]
+        base_pct = ctx.risk_percent * 100
         logging.info(
             "Risco reduzido em %s (%s) — streak=%d risco=%.2f%%",
             symbol,
             selected["risk_key"],
             streak,
-            default_risk_per_trade * risk_mult * 100,
+            base_pct * risk_mult,
         )
 
     pos = enter_position(
@@ -1058,7 +318,7 @@ def analyze_ema_macd_and_maybe_trade(symbol):
         account_balance,
         side=selected["side"],
         strategy_label=selected["risk_key"],
-        risk_multiplier=risk_mult,
+        risk_multiplier=None,
         bar_time=selected.get("bar_time"),
         timeframe=selected.get("tf"),
     )
@@ -1066,7 +326,7 @@ def analyze_ema_macd_and_maybe_trade(symbol):
     return pos, summary
 
 def analyze_and_maybe_trade(symbol):
-    if strategy_mode == "ema_macd":
+    if ctx.strategy_mode == "ema_macd":
         return analyze_ema_macd_and_maybe_trade(symbol)
     return analyze_momentum_and_maybe_trade(symbol)
 
@@ -1091,16 +351,16 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
         if entry_side == 'buy':
             max_price = high
             rr_reached = (max_price - entry_ref_price) / risk_per_unit
-            if (not be_moved) and rr_reached >= break_even_rr:
+            if (not be_moved) and rr_reached >= ctx.break_even_rr:
                 current_sl = entry_ref_price
                 be_moved = True
-            if (not partial_done) and rr_reached >= take_partial_rr:
+            if (not partial_done) and rr_reached >= ctx.take_partial_rr:
                 partial_done = True
             hit_tp = (high >= tp_price)
             hit_sl = (low <= current_sl)
             if hit_tp and not hit_sl:
                 if partial_done:
-                    price_partial = entry_ref_price + take_partial_rr * risk_per_unit
+                    price_partial = entry_ref_price + ctx.take_partial_rr * risk_per_unit
                     pnl_partial = (price_partial - entry_ref_price) * 0.5
                     pnl_rest = (tp_price - entry_ref_price) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -1109,7 +369,7 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
                 return {"exit_price": tp_price, "exit_idx": i, "outcome":"tp", "pnl": pnl_total}
             if hit_sl and not hit_tp:
                 if partial_done:
-                    price_partial = entry_ref_price + take_partial_rr * risk_per_unit
+                    price_partial = entry_ref_price + ctx.take_partial_rr * risk_per_unit
                     pnl_partial = (price_partial - entry_ref_price) * 0.5
                     pnl_rest = (current_sl - entry_ref_price) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -1123,7 +383,7 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
                 outcome = "tp" if dist_tp <= dist_sl else "sl"
                 exit_price = tp_price if outcome=="tp" else current_sl
                 if partial_done:
-                    price_partial = entry_ref_price + take_partial_rr * risk_per_unit
+                    price_partial = entry_ref_price + ctx.take_partial_rr * risk_per_unit
                     pnl_partial = (price_partial - entry_ref_price) * 0.5
                     pnl_rest = (exit_price - entry_ref_price) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -1133,16 +393,16 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
         else:
             min_price = low
             rr_reached = (entry_ref_price - min_price) / risk_per_unit
-            if (not be_moved) and rr_reached >= break_even_rr:
+            if (not be_moved) and rr_reached >= ctx.break_even_rr:
                 current_sl = entry_ref_price
                 be_moved = True
-            if (not partial_done) and rr_reached >= take_partial_rr:
+            if (not partial_done) and rr_reached >= ctx.take_partial_rr:
                 partial_done = True
             hit_tp = (low <= tp_price)
             hit_sl = (high >= current_sl)
             if hit_tp and not hit_sl:
                 if partial_done:
-                    price_partial = entry_ref_price - take_partial_rr * risk_per_unit
+                    price_partial = entry_ref_price - ctx.take_partial_rr * risk_per_unit
                     pnl_partial = (entry_ref_price - price_partial) * 0.5
                     pnl_rest = (entry_ref_price - tp_price) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -1151,7 +411,7 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
                 return {"exit_price": tp_price, "exit_idx": i, "outcome":"tp", "pnl": pnl_total}
             if hit_sl and not hit_tp:
                 if partial_done:
-                    price_partial = entry_ref_price - take_partial_rr * risk_per_unit
+                    price_partial = entry_ref_price - ctx.take_partial_rr * risk_per_unit
                     pnl_partial = (entry_ref_price - price_partial) * 0.5
                     pnl_rest = (entry_ref_price - current_sl) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -1165,7 +425,7 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
                 outcome = "tp" if dist_tp <= dist_sl else "sl"
                 exit_price = tp_price if outcome=="tp" else current_sl
                 if partial_done:
-                    price_partial = entry_ref_price - take_partial_rr * risk_per_unit
+                    price_partial = entry_ref_price - ctx.take_partial_rr * risk_per_unit
                     pnl_partial = (entry_ref_price - price_partial) * 0.5
                     pnl_rest = (entry_ref_price - exit_price) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -1177,7 +437,7 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
     final_price = df['close'].iloc[-1]
     if entry_side == 'buy':
         if partial_done:
-            price_partial = entry_ref_price + take_partial_rr * risk_per_unit
+            price_partial = entry_ref_price + ctx.take_partial_rr * risk_per_unit
             pnl_partial = (price_partial - entry_ref_price) * 0.5
             pnl_rest = (final_price - entry_ref_price) * 0.5
             pnl_total = pnl_partial + pnl_rest
@@ -1185,7 +445,7 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
             pnl_total = final_price - entry_ref_price
     else:
         if partial_done:
-            price_partial = entry_ref_price - take_partial_rr * risk_per_unit
+            price_partial = entry_ref_price - ctx.take_partial_rr * risk_per_unit
             pnl_partial = (entry_ref_price - price_partial) * 0.5
             pnl_rest = (entry_ref_price - final_price) * 0.5
             pnl_total = pnl_partial + pnl_rest
@@ -1194,11 +454,11 @@ def simulate_trade_on_series(df, entry_idx, entry_side, sl_price, tp_price, entr
     return {"exit_price": final_price, "exit_idx": n-1, "outcome": "none", "pnl": pnl_total}
 
 def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None, cross_lookback=None, require_divergence=None):
-    strategy = strategy or strategy_mode
-    effective_bias = bias or trade_bias
-    cross_lb = cross_lookback if cross_lookback is not None else ema_macd_cross_lookback
-    divergence_required = ema_macd_require_divergence if require_divergence is None else require_divergence
-    active_timeframes = [tf for tf in timeframes if tf == timeframe] or [timeframe]
+    strategy = strategy or ctx.strategy_mode
+    effective_bias = bias or ctx.trade_bias
+    cross_lb = cross_lookback if cross_lookback is not None else ctx.ema_macd_cross_lookback
+    divergence_required = ctx.ema_macd_require_divergence if require_divergence is None else require_divergence
+    active_timeframes = [tf for tf in ctx.timeframes if tf == timeframe] or [timeframe]
     logging.info("Backtest %s %s last %d days", symbol, timeframe, lookback_days)
     minutes = timeframe_to_minutes(timeframe)
     candles_needed = int((24*60/ minutes) * lookback_days) + 200
@@ -1208,11 +468,11 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
         logging.error("Dados insuficientes para backtest.")
         return None, coverage_info
 
-    sim_risk = simulation_risk_per_trade
-    current_equity = simulation_base_capital
+    sim_risk = ctx.simulation_risk_per_trade
+    current_equity = ctx.simulation_base_capital
 
     slice_store = {}
-    for tf in timeframes:
+    for tf in ctx.timeframes:
         tf_minutes = timeframe_to_minutes(tf)
         candles_tf = int((24*60/ tf_minutes) * lookback_days) + 200
         if tf == timeframe:
@@ -1232,9 +492,9 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
             if dfrag is None:
                 slices[tf] = None
                 continue
-            d = dfrag[dfrag.index <= ts].tail(lookback)
+            d = dfrag[dfrag.index <= ts].tail(ctx.lookback)
             slices[tf] = d if len(d) >= 60 else None
-        bias_snapshot = {tf: bias_from_slices(tf, ts, slice_store) for tf in timeframes}
+        bias_snapshot = {tf: bias_from_slices(tf, ts, slice_store) for tf in ctx.timeframes}
         selected_trade = None
 
         if strategy == "momentum":
@@ -1252,10 +512,10 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
                     continue
                 if has_div:
                     details["score"] = details.get("score", 0) + 0.5
-                if bias_dir == "down" and details.get("score", 0) < momentum_bias_override_score:
+                if bias_dir == "down" and details.get("score", 0) < ctx.momentum_bias_override_score:
                     continue
                 momentum_ready.append((tf, details))
-            required = max(1, min(momentum_min_tf_agree, len(momentum_ready)))
+            required = max(1, min(ctx.momentum_min_tf_agree, len(momentum_ready)))
             if len(momentum_ready) < required:
                 continue
             momentum_ready.sort(key=lambda item: item[1].get("score", 0), reverse=True)
@@ -1264,10 +524,10 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
             atr_val = detail.get("atr")
             if entry_price is None or atr_val in (None, 0):
                 continue
-            stop_price = entry_price - atr_val * momentum_stop_atr
-            tp_price = entry_price + atr_val * momentum_tp_atr
+            stop_price = entry_price - atr_val * ctx.momentum_stop_atr
+            tp_price = entry_price + atr_val * ctx.momentum_tp_atr
             rr = compute_rr(entry_price, stop_price, tp_price, side='buy')
-            if rr is None or rr < min_rr_required:
+            if rr is None or rr < ctx.min_rr_required:
                 continue
             selected_trade = {
                 "tf": ref_tf,
@@ -1285,7 +545,7 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
             if effective_bias in ("long", "both"):
                 for tf in active_timeframes:
                     slice_df = slices.get(tf)
-                    if slice_df is None or len(slice_df) < ema_slow_period + 10:
+                    if slice_df is None or len(slice_df) < ctx.ema_slow_period + 10:
                         continue
                     confirmed_long, details_long = ema_macd_confirm(
                         slice_df,
@@ -1294,16 +554,16 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
                     )
                     if not confirmed_long or not details_long.get("atr"):
                         continue
-                    if not bias_allows_long(tf, bias_snapshot) and details_long.get("score", 0) < ema_macd_bias_override_score:
+                    if not bias_allows_long(tf, bias_snapshot) and details_long.get("score", 0) < ctx.ema_macd_bias_override_score:
                         continue
                     entry_price = details_long.get("last_close")
                     atr_val = details_long.get("atr")
                     if entry_price is None or atr_val in (None, 0):
                         continue
-                    stop_price = entry_price - atr_val * ema_macd_stop_atr
-                    tp_price = entry_price + atr_val * ema_macd_tp_atr
+                    stop_price = entry_price - atr_val * ctx.ema_macd_stop_atr
+                    tp_price = entry_price + atr_val * ctx.ema_macd_tp_atr
                     rr = compute_rr(entry_price, stop_price, tp_price, side='buy')
-                    if rr is None or rr < min_rr_required:
+                    if rr is None or rr < ctx.min_rr_required:
                         continue
                     candidates.append({
                         "tf": tf,
@@ -1320,17 +580,17 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
             if effective_bias in ("short", "both"):
                 for tf in active_timeframes:
                     slice_df = slices.get(tf)
-                    if slice_df is None or len(slice_df) < ema_slow_period + 10:
+                    if slice_df is None or len(slice_df) < ctx.ema_slow_period + 10:
                         continue
                     confirmed_short, details_short = ema_macd_confirm_short(
                         slice_df,
-                        ema_fast_period=ema_fast_period,
-                        ema_slow_period=ema_slow_period,
-                        ema_macd_fast=ema_macd_fast,
-                        ema_macd_slow=ema_macd_slow,
-                        ema_macd_signal=ema_macd_signal,
-                        atr_period=atr_period,
-                        rsi_period=rsi_period,
+                        ema_fast_period=ctx.ema_fast_period,
+                        ema_slow_period=ctx.ema_slow_period,
+                        ema_macd_fast=ctx.ema_macd_fast,
+                        ema_macd_slow=ctx.ema_macd_slow,
+                        ema_macd_signal=ctx.ema_macd_signal,
+                        atr_period=ctx.atr_period,
+                        rsi_period=ctx.rsi_period,
                         compute_atr=compute_atr,
                         compute_rsi=compute_rsi,
                         compute_macd=compute_macd,
@@ -1348,16 +608,16 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
                         )
                     if not confirmed_short or not details_short.get("atr"):
                         continue
-                    if not bias_allows_short(tf, bias_snapshot) and details_short.get("score", 0) < ema_macd_bias_override_score:
+                    if not bias_allows_short(tf, bias_snapshot) and details_short.get("score", 0) < ctx.ema_macd_bias_override_score:
                         continue
                     entry_price = details_short.get("last_close")
                     atr_val = details_short.get("atr")
                     if entry_price is None or atr_val in (None, 0):
                         continue
-                    stop_price = entry_price + atr_val * ema_macd_stop_atr
-                    tp_price = entry_price - atr_val * ema_macd_tp_atr
+                    stop_price = entry_price + atr_val * ctx.ema_macd_stop_atr
+                    tp_price = entry_price - atr_val * ctx.ema_macd_tp_atr
                     rr = compute_rr(entry_price, stop_price, tp_price, side='sell')
-                    if rr is None or rr < min_rr_required:
+                    if rr is None or rr < ctx.min_rr_required:
                         continue
                     candidates.append({
                         "tf": tf,
@@ -1458,14 +718,13 @@ def backtest_pair(symbol, timeframe, lookback_days=90, strategy=None, bias=None,
 
 # ---------- Main loop ----------
 def main_loop(symbols: Optional[List[str]] = None):
-    active_symbols = list(symbols) if symbols else list(pairs)
-    open_positions.clear()
-    last_entry_tracker.clear()
+    active_symbols = list(symbols) if symbols else list(ctx.pairs)
+    reset_runtime_state()
     logging.info(
         "Bot iniciado — pares: %s — timeframes: %s — entry_tfs: %s",
         active_symbols,
-        timeframes,
-        entry_timeframes,
+        ctx.timeframes,
+        ctx.entry_timeframes,
     )
     while True:
         start = time.time()
@@ -1480,12 +739,12 @@ def main_loop(symbols: Optional[List[str]] = None):
             time.sleep(0.5)
         # monitor open positions for addon/SL/TP
         try:
-            monitor_and_close_positions(open_positions)
+            monitor_and_close_positions(state.open_positions)
         except Exception as e:
             logging.exception("Erro no monitor loop: %s", e)
         write_runtime_state(serialize_open_positions(), iteration_snapshot)
         elapsed = time.time() - start
-        sleep_for = max(0, loop_interval_seconds - elapsed)
+        sleep_for = max(0, ctx.loop_interval_seconds - elapsed)
         logging.info("Iteração completa. A dormir %.1f s", sleep_for)
         time.sleep(sleep_for)
 
@@ -1498,12 +757,16 @@ if __name__ == "__main__":
     paper_group = parser.add_mutually_exclusive_group()
     paper_group.add_argument('--paper-mode', dest='paper', action='store_const', const=True, help='Força modo paper (test) mesmo se o config estiver em live')
     paper_group.add_argument('--no-paper', dest='paper', action='store_const', const=False, help='Disable paper mode (will execute real orders)')
-    parser.add_argument('--strategy', choices=['momentum','ema_macd'], default='momentum', help='Seleciona estratégia principal')
-    parser.add_argument('--cross-lookback', dest='cross_lookback', type=int, default=ema_macd_cross_lookback, help='Janela (nº de velas) para aceitar cruzamentos EMA/MACD recentes')
-    parser.add_argument('--trade-bias', choices=['long','short','both'], default=trade_bias, help='Direção de trade: only long, only short ou ambos')
+    parser.add_argument('--strategy', choices=['momentum','ema_macd'], default=ctx.strategy_mode, help='Seleciona estratégia principal')
+    parser.add_argument('--cross-lookback', dest='cross_lookback', type=int, default=ctx.ema_macd_cross_lookback, help='Janela (nº de velas) para aceitar cruzamentos EMA/MACD recentes')
+    parser.add_argument('--trade-bias', choices=['long','short','both'], default=ctx.trade_bias, help='Direção de trade: only long, only short ou ambos')
+    parser.add_argument('--risk-percent', dest='risk_percent', type=float, help='Percentual do capital alocado a arriscar por trade (ex.: 1.0 para 1%).')
+    parser.add_argument('--capital-base', dest='capital_base', type=float, help='Capital base máximo para cálculo de risco (padrão segue config).')
+    parser.add_argument('--risk-mode', dest='risk_mode', choices=['standard','hunter'], help='Modo de risco: standard limita pelo capital base; hunter usa 100% do saldo.')
+    parser.add_argument('--leverage', dest='leverage', type=float, help='Alavancagem alvo para limitar o tamanho máximo da posição.')
     parser.add_argument('--log-level', dest='log_level', default='INFO', help='Nível de logging (DEBUG, INFO, WARNING, ...)')
     divergence_group = parser.add_mutually_exclusive_group()
-    divergence_group.add_argument('--require-divergence', dest='require_divergence', action='store_true', default=ema_macd_require_divergence, help='Exige divergência RSI para setups EMA+MACD (padrão)')
+    divergence_group.add_argument('--require-divergence', dest='require_divergence', action='store_true', default=ctx.ema_macd_require_divergence, help='Exige divergência RSI para setups EMA+MACD (padrão)')
     divergence_group.add_argument('--allow-no-divergence', dest='require_divergence', action='store_false', help='Permite setups EMA+MACD mesmo sem divergência RSI')
     parser.add_argument('--check-symbol', dest='check_symbol', help='Valida se o par existe na corretora e termina imediatamente')
     parser.add_argument('--all-pairs', dest='all_pairs', action='store_true', help='Loop live cobre todos os pares configurados (ignora --symbol)')
@@ -1526,53 +789,70 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(log_level)
     logging.info("Log level definido para %s", logging.getLevelName(log_level))
 
-    logging.info("Script iniciado. ambiente configurado=%s (paper=%s)", environment_mode, paper)
+    logging.info("Script iniciado. ambiente configurado=%s (paper=%s)", ctx.environment_mode, ctx.paper)
 
     if args.paper is not None:
-        paper = args.paper
-        environment_mode = "paper" if paper else "live"
-        update_user_config(environment=environment_mode)
-        logging.info("Ambiente ajustado via CLI para %s", environment_mode)
+        ctx.update_environment_mode("paper" if args.paper else "live")
+        update_user_config(environment=ctx.environment_mode)
+        logging.info("Ambiente ajustado via CLI para %s", ctx.environment_mode)
 
-    if paper:
+    if ctx.paper:
         logging.info("MODO PAPER ATIVO — ordens reais NÃO serão colocadas.")
     else:
         logging.warning("MODO REAL: As ordens reais serão enviadas — esteja certo do seu API_KEY/API_SECRET e capital.")
 
-    strategy_mode = args.strategy
-    logging.info("Estratégia ativa: %s", strategy_mode)
+    cli_overrides = {
+        "strategy_mode": args.strategy,
+        "trade_bias": args.trade_bias,
+        "ema_cross_lookback": args.cross_lookback,
+        "ema_require_divergence": args.require_divergence,
+    }
+    if args.risk_percent is not None:
+        cli_overrides["risk_percent"] = max(0.0001, args.risk_percent / 100.0)
+    if args.capital_base is not None:
+        cli_overrides["capital_base"] = max(0.0, args.capital_base)
+    if args.risk_mode is not None:
+        cli_overrides["risk_mode"] = args.risk_mode
+    if args.leverage is not None:
+        cli_overrides["leverage"] = max(1.0, args.leverage)
 
-    trade_bias = args.trade_bias
-    logging.info("Bias de trade ativo: %s", trade_bias)
+    ctx.override_from_cli(cli_overrides)
 
-    ema_macd_cross_lookback = args.cross_lookback
-    logging.info("EMA/MACD cross lookback: %d velas", ema_macd_cross_lookback)
-
-    ema_macd_require_divergence = args.require_divergence
-    logging.info("EMA/MACD exige divergência RSI: %s", "sim" if ema_macd_require_divergence else "não")
+    logging.info("Estratégia ativa: %s", ctx.strategy_mode)
+    logging.info("Bias de trade ativo: %s", ctx.trade_bias)
+    logging.info("EMA/MACD cross lookback: %d velas", ctx.ema_macd_cross_lookback)
+    logging.info("EMA/MACD exige divergência RSI: %s", "sim" if ctx.ema_macd_require_divergence else "não")
+    logging.info("Modo de risco: %s", ctx.risk_mode)
+    logging.info("Risco por trade: %.2f%%", ctx.risk_percent * 100)
+    logging.info("Capital base para sizing: %.2f", ctx.capital_base)
+    logging.info("Alavancagem alvo: %.2fx", ctx.leverage)
 
     update_user_config(
-        environment=environment_mode,
-        trade_bias=trade_bias,
-        ema_cross_lookback=ema_macd_cross_lookback,
-        ema_require_divergence=ema_macd_require_divergence,
+        environment=ctx.environment_mode,
+        trade_bias=ctx.trade_bias,
+        ema_cross_lookback=ctx.ema_macd_cross_lookback,
+        ema_require_divergence=ctx.ema_macd_require_divergence,
         symbol=args.symbol,
         timeframe=args.timeframe,
+        risk_mode=ctx.risk_mode,
+        risk_percent=ctx.risk_percent,
+        capital_base=ctx.capital_base,
+        leverage=ctx.leverage,
     )
 
     if args.live:
         selected_symbols: List[str]
         if args.all_pairs:
-            selected_symbols = list(pairs)
+            selected_symbols = list(ctx.pairs)
         elif args.symbol:
             selected_symbols = [args.symbol]
         else:
-            selected_symbols = list(pairs)
-        set_entry_timeframes([args.timeframe])
+            selected_symbols = list(ctx.pairs)
+        ctx.set_entry_timeframes([args.timeframe])
         logging.info(
             "Running live main loop for symbols=%s com timeframe base %s",
             selected_symbols,
-            entry_timeframes,
+            ctx.entry_timeframes,
         )
         # user should set API keys
         main_loop(symbols=selected_symbols)
@@ -1584,9 +864,9 @@ if __name__ == "__main__":
                 args.timeframe,
                 lookback_days=args.lookback_days,
                 strategy=args.strategy,
-                bias=trade_bias,
-                cross_lookback=ema_macd_cross_lookback,
-                require_divergence=ema_macd_require_divergence,
+                bias=ctx.trade_bias,
+                cross_lookback=ctx.ema_macd_cross_lookback,
+                require_divergence=ctx.ema_macd_require_divergence,
             )
             if df_trades is not None and not df_trades.empty:
                 print(df_trades.head())
@@ -1599,12 +879,12 @@ if __name__ == "__main__":
                 df_trades if df_trades is not None else pd.DataFrame(),
                 coverage=coverage_info,
                 simulation={
-                    "base_capital": simulation_base_capital,
-                    "risk_per_trade": simulation_risk_per_trade,
-                    "ema_cross_lookback": ema_macd_cross_lookback,
-                    "ema_require_divergence": ema_macd_require_divergence,
-                    "trade_bias": trade_bias,
-                    "environment": environment_mode,
+                    "base_capital": ctx.simulation_base_capital,
+                    "risk_per_trade": ctx.simulation_risk_per_trade,
+                    "ema_cross_lookback": ctx.ema_macd_cross_lookback,
+                    "ema_require_divergence": ctx.ema_macd_require_divergence,
+                    "trade_bias": ctx.trade_bias,
+                    "environment": ctx.environment_mode,
                 }
             )
         except Exception as e:

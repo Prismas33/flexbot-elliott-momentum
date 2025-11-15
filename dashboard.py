@@ -11,14 +11,11 @@ import pandas as pd
 
 from elliott_momentum_breakout_bot import (
     backtest_pair,
-    pairs,
-    timeframes,
-    simulation_base_capital,
-    simulation_risk_per_trade,
     fetch_account_balance,
     get_environment_mode,
     validate_symbol,
 )
+from flexbot import context as ctx
 from state_store import read_user_config, update_user_config, read_control_state, write_control_state
 
 st.set_page_config(page_title="FlexBot Dashboard", layout="wide")
@@ -266,11 +263,13 @@ with st.sidebar:
         st.caption("Valor estimado reportado pela corretora; se estiver em paper/fallback, o total padrão é $10.000.")
 
     default_symbol = config_data.get("symbol")
-    symbol_index = pairs.index(default_symbol) if isinstance(default_symbol, str) and default_symbol in pairs else 0
-    symbol = st.selectbox("Par", options=pairs, index=symbol_index)
+    available_pairs = list(ctx.pairs)
+    symbol_index = available_pairs.index(default_symbol) if isinstance(default_symbol, str) and default_symbol in available_pairs else 0
+    symbol = st.selectbox("Par", options=available_pairs, index=symbol_index)
     default_timeframe = config_data.get("timeframe")
-    timeframe_index = timeframes.index(default_timeframe) if isinstance(default_timeframe, str) and default_timeframe in timeframes else 1
-    timeframe = st.selectbox("Timeframe", options=timeframes, index=timeframe_index)
+    available_timeframes = list(ctx.timeframes)
+    default_tf_index = available_timeframes.index(default_timeframe) if isinstance(default_timeframe, str) and default_timeframe in available_timeframes else 1 if len(available_timeframes) > 1 else 0
+    timeframe = st.selectbox("Timeframe", options=available_timeframes, index=default_tf_index)
     lookback_days = st.slider("Lookback (dias)", min_value=30, max_value=180, value=60, step=5)
     strategy = "ema_macd"
     strategy_display = "EMA + MACD"
@@ -290,6 +289,67 @@ with st.sidebar:
         format_func=lambda k: bias_label.get(k, k),
         index=bias_options.index(default_bias),
     )
+
+    risk_mode_labels = {
+        "standard": "Alocado",
+        "hunter": "Hunter (100%)",
+    }
+    current_risk_mode = config_data.get("risk_mode", ctx.risk_mode)
+    if current_risk_mode not in risk_mode_labels:
+        current_risk_mode = ctx.risk_mode
+    risk_mode_choice = st.selectbox(
+        "Modo de risco",
+        options=list(risk_mode_labels.keys()),
+        index=list(risk_mode_labels.keys()).index(current_risk_mode),
+        format_func=lambda k: risk_mode_labels.get(k, k),
+    )
+
+    configured_risk_percent = config_data.get("risk_percent")
+    try:
+        configured_risk_percent = float(configured_risk_percent)
+    except (TypeError, ValueError):
+        configured_risk_percent = ctx.risk_percent
+    if configured_risk_percent <= 0:
+        configured_risk_percent = ctx.risk_percent
+    risk_percent_value = st.number_input(
+        "Risco por trade (%)",
+        min_value=0.01,
+        max_value=100.0,
+        value=float(round(configured_risk_percent * 100, 2)),
+        step=0.05,
+        help="Percentual do capital alocado que será arriscado até o stop. No modo Hunter, aplica-se sobre o saldo completo.",
+        format="%.2f",
+    ) / 100.0
+
+    configured_capital_base = config_data.get("capital_base", ctx.capital_base)
+    try:
+        configured_capital_base = float(configured_capital_base)
+    except (TypeError, ValueError):
+        configured_capital_base = ctx.capital_base
+    capital_base_value = st.number_input(
+        "Capital base para sizing",
+        min_value=0.0,
+        value=float(round(configured_capital_base, 2)),
+        step=50.0,
+        help="Montante máximo considerado para calcular o risco. Se o saldo for menor, usa o saldo disponível.",
+        disabled=risk_mode_choice == "hunter",
+        format="%.2f",
+    )
+
+    configured_leverage = config_data.get("leverage", ctx.leverage)
+    try:
+        configured_leverage = float(configured_leverage)
+    except (TypeError, ValueError):
+        configured_leverage = ctx.leverage
+    leverage_value = st.number_input(
+        "Alavancagem alvo",
+        min_value=1.0,
+        max_value=125.0,
+        value=float(round(configured_leverage, 2)),
+        step=0.5,
+        help="Usado para limitar o tamanho máximo da posição de acordo com a margem disponível.",
+        format="%.2f",
+    )
     default_cross = config_data.get("ema_cross_lookback", 8)
     if not isinstance(default_cross, int) or default_cross < 2 or default_cross > 30:
         default_cross = 8
@@ -308,6 +368,10 @@ with st.sidebar:
         or config_data.get("trade_bias") != trade_bias
         or config_data.get("ema_cross_lookback") != cross_lookback
         or config_data.get("ema_require_divergence") != require_divergence
+        or config_data.get("risk_mode") != risk_mode_choice
+        or abs(configured_risk_percent - risk_percent_value) > 1e-9
+        or abs(configured_capital_base - capital_base_value) > 1e-9
+        or abs(configured_leverage - leverage_value) > 1e-9
     ):
         config_data = update_user_config(
             symbol=symbol,
@@ -315,6 +379,10 @@ with st.sidebar:
             trade_bias=trade_bias,
             ema_cross_lookback=cross_lookback,
             ema_require_divergence=require_divergence,
+            risk_mode=risk_mode_choice,
+            risk_percent=risk_percent_value,
+            capital_base=capital_base_value,
+            leverage=leverage_value,
         )
     if "pair_validation" not in st.session_state:
         st.session_state["pair_validation"] = None
@@ -337,6 +405,12 @@ with st.sidebar:
     st.caption("Para métricas em tempo real, mantenha `main_loop()` rodando (ex.: `start.ps1 -Action live`).")
 
 divergence_badge = "On" if require_divergence else "Off"
+risk_badge_label = (
+    f"Hunter · Risco {risk_percent_value*100:.1f}%"
+    if risk_mode_choice == "hunter"
+    else f"Risco {risk_percent_value*100:.1f}% · Base {capital_base_value:.0f}"
+)
+leverage_badge_label = f"Lev {leverage_value:.1f}x"
 summary_html = f"""
 <div class='hero-card'>
     <div>
@@ -347,6 +421,8 @@ summary_html = f"""
         <span class='status-pill {env_choice}'>{env_labels.get(env_choice, env_choice.title())}</span>
         <span class='status-pill slim'>Divergência {divergence_badge}</span>
         <span class='status-pill slim'>Bias {bias_label.get(trade_bias, trade_bias)}</span>
+        <span class='status-pill slim'>{risk_badge_label}</span>
+        <span class='status-pill slim'>{leverage_badge_label}</span>
     </div>
 </div>
 """
@@ -537,7 +613,7 @@ with backtest_tab:
             cards = [
                 ("Trades", f"{total_trades}", f"{len(wins)} vit · {len(losses)} der · {len(breakevens)} be"),
                 ("Winrate", f"{winrate:.1f}%", "com base em resultados líquidos" if eligible else "sem trades contabilizados"),
-                ("PNL total", f"${total_pnl:.2f}", f"Capital inicial ${simulation_base_capital:.0f}"),
+                ("PNL total", f"${total_pnl:.2f}", f"Capital inicial ${ctx.simulation_base_capital:.0f}"),
                 ("Média Gain", f"${avg_win:.2f}", "por trade vencedor"),
                 ("Média Loss", f"${avg_loss:.2f}", "por trade perdedor"),
             ]
@@ -547,7 +623,7 @@ with backtest_tab:
             )
             st.markdown(f"<div class='metric-grid'>{cards_html}</div>", unsafe_allow_html=True)
             st.caption(
-                f"Simulação: capital inicial ${simulation_base_capital:.0f} | risco {simulation_risk_per_trade*100:.0f}% por trade | estratégia {strategy_display} | bias {bias_label.get(trade_bias, trade_bias)} | cross lookback {cross_lookback} velas | divergência {'obrigatória' if require_divergence else 'opcional'} | vitórias {len(wins)} | derrotas {len(losses)} | breakeven {len(breakevens)}"
+                f"Simulação: capital inicial ${ctx.simulation_base_capital:.0f} | risco {ctx.simulation_risk_per_trade*100:.0f}% por trade | estratégia {strategy_display} | bias {bias_label.get(trade_bias, trade_bias)} | cross lookback {cross_lookback} velas | divergência {'obrigatória' if require_divergence else 'opcional'} | vitórias {len(wins)} | derrotas {len(losses)} | breakeven {len(breakevens)}"
             )
 
             st.subheader("Evolução do PnL cumulativo")
