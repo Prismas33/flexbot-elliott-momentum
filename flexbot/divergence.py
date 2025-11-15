@@ -28,8 +28,9 @@ def has_bullish_rsi_divergence(df: pd.DataFrame, order: int | None = None) -> bo
     rsi2 = rsi.iloc[idx2]
     if np.isnan(price1) or np.isnan(price2) or np.isnan(rsi1) or np.isnan(rsi2):
         return False
-    price_drop_pct = abs(price2 - price1) / price1
-    if price_drop_pct < 0.015:
+    threshold = max(0.0, context.divergence_min_drop_pct)
+    price_drop_pct = abs(price2 - price1) / price1 if price1 != 0 else 0.0
+    if price_drop_pct < threshold:
         return False
     return price2 < price1 and rsi2 > rsi1
 
@@ -55,7 +56,8 @@ def has_bearish_rsi_divergence(df: pd.DataFrame, order: int | None = None) -> bo
     rsi2 = rsi.iloc[idx2]
     if np.isnan(price1) or np.isnan(price2) or np.isnan(rsi1) or np.isnan(rsi2):
         return False
-    price_push_pct = abs(price2 - price1) / price1
-    if price_push_pct < 0.015:
+    threshold = max(0.0, context.divergence_min_drop_pct)
+    price_push_pct = abs(price2 - price1) / price1 if price1 != 0 else 0.0
+    if price_push_pct < threshold:
         return False
     return price2 > price1 and rsi2 < rsi1

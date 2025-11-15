@@ -29,7 +29,7 @@ from state_store import (
 )
 
 from flexbot import context, state
-from flexbot.backtest import backtest_pair
+from flexbot.backtest import backtest_pair, backtest_many
 from flexbot.live_loop import main_loop
 
 
@@ -61,6 +61,13 @@ if __name__ == "__main__":
     divergence_group = parser.add_mutually_exclusive_group()
     divergence_group.add_argument('--require-divergence', dest='require_divergence', action='store_true', default=ctx.ema_macd_require_divergence, help='Exige divergência RSI para setups OMDs (padrão)')
     divergence_group.add_argument('--allow-no-divergence', dest='require_divergence', action='store_false', help='Permite setups OMDs mesmo sem divergência RSI')
+    rsi_zone_group = parser.add_mutually_exclusive_group()
+    rsi_zone_group.add_argument('--require-rsi-zone', dest='require_rsi_zone', action='store_true', help='Exige que o RSI esteja em zona de sobrevenda/sobrecompra configurada para validar OMDs.')
+    rsi_zone_group.add_argument('--disable-rsi-zone', dest='require_rsi_zone', action='store_false', help='Não exige validação adicional de zona de RSI.')
+    rsi_zone_group.set_defaults(require_rsi_zone=ctx.ema_require_rsi_zone)
+    parser.add_argument('--rsi-zone-long-max', dest='rsi_zone_long_max', type=float, default=ctx.ema_rsi_zone_long_max, help='Máximo de RSI permitido para entradas long quando a validação de zona está ativa.')
+    parser.add_argument('--rsi-zone-short-min', dest='rsi_zone_short_min', type=float, default=ctx.ema_rsi_zone_short_min, help='Mínimo de RSI permitido para entradas short quando a validação de zona está ativa.')
+    parser.add_argument('--divergence-min-drop', dest='divergence_min_drop', type=float, default=ctx.divergence_min_drop_pct * 100, help='Variação percentual mínima entre fundos/topos consecutivos para considerar divergência RSI (ex.: 1.5 = 1.5%%).')
     parser.add_argument('--check-symbol', dest='check_symbol', help='Valida se o par existe na corretora e termina imediatamente')
     parser.add_argument('--all-pairs', dest='all_pairs', action='store_true', help='Loop live cobre todos os pares configurados (ignora --symbol)')
     parser.set_defaults(paper=None)
@@ -99,6 +106,7 @@ if __name__ == "__main__":
         "trade_bias": args.trade_bias,
         "ema_cross_lookback": args.cross_lookback,
         "ema_require_divergence": args.require_divergence,
+        "ema_require_rsi_zone": args.require_rsi_zone,
     }
     if args.risk_percent is not None:
         cli_overrides["risk_percent"] = max(0.0001, args.risk_percent / 100.0)
@@ -108,6 +116,12 @@ if __name__ == "__main__":
         cli_overrides["risk_mode"] = args.risk_mode
     if args.leverage is not None:
         cli_overrides["leverage"] = max(1.0, args.leverage)
+    if args.divergence_min_drop is not None:
+        cli_overrides["divergence_min_drop_pct"] = max(0.0, args.divergence_min_drop / 100.0)
+    if args.rsi_zone_long_max is not None:
+        cli_overrides["ema_rsi_zone_long_max"] = args.rsi_zone_long_max
+    if args.rsi_zone_short_min is not None:
+        cli_overrides["ema_rsi_zone_short_min"] = args.rsi_zone_short_min
 
     ctx.override_from_cli(cli_overrides)
 
@@ -116,16 +130,27 @@ if __name__ == "__main__":
     if ctx.strategy_mode == "ema_macd":
         logging.info("OMDs cross lookback: %d velas", ctx.ema_macd_cross_lookback)
         logging.info("OMDs exige divergência RSI: %s", "sim" if ctx.ema_macd_require_divergence else "não")
+        logging.info(
+            "OMDs exige RSI em zona: %s (long ≤ %.2f | short ≥ %.2f)",
+            "sim" if ctx.ema_require_rsi_zone else "não",
+            ctx.ema_rsi_zone_long_max,
+            ctx.ema_rsi_zone_short_min,
+        )
     logging.info("Modo de risco: %s", ctx.risk_mode)
     logging.info("Risco por trade: %.2f%%", ctx.risk_percent * 100)
     logging.info("Capital base para sizing: %.2f", ctx.capital_base)
     logging.info("Alavancagem alvo: %.2fx", ctx.leverage)
+    logging.info("Divergência RSI: queda mínima %.2f%% entre pivôs", ctx.divergence_min_drop_pct * 100)
 
     update_user_config(
         environment=ctx.environment_mode,
         trade_bias=ctx.trade_bias,
         ema_cross_lookback=ctx.ema_macd_cross_lookback,
         ema_require_divergence=ctx.ema_macd_require_divergence,
+        divergence_min_drop_pct=ctx.divergence_min_drop_pct,
+        ema_require_rsi_zone=ctx.ema_require_rsi_zone,
+        ema_rsi_zone_long_max=ctx.ema_rsi_zone_long_max,
+        ema_rsi_zone_short_min=ctx.ema_rsi_zone_short_min,
         symbol=args.symbol,
         timeframe=args.timeframe,
         risk_mode=ctx.risk_mode,
@@ -154,23 +179,57 @@ if __name__ == "__main__":
         # user should set API keys
         main_loop(symbols=selected_symbols)
     else:
-        logging.info("Running backtest for %s %s (lookback %d days)", args.symbol, args.timeframe, args.lookback_days)
+        if args.all_pairs:
+            symbols_for_bt = list(dict.fromkeys(
+                list(ctx.active_pairs) if getattr(ctx, "active_pairs", None) else [args.symbol]
+            ))
+            if args.symbol not in symbols_for_bt:
+                symbols_for_bt.insert(0, args.symbol)
+        else:
+            symbols_for_bt = [args.symbol]
+
+        multi_symbol_bt = len(symbols_for_bt) > 1
+        symbols_label = ", ".join(symbols_for_bt)
+        logging.info(
+            "Running backtest for %s @ %s (lookback %d days)",
+            symbols_label,
+            args.timeframe,
+            args.lookback_days,
+        )
         try:
-            df_trades, coverage_info = backtest_pair(
-                args.symbol,
-                args.timeframe,
-                lookback_days=args.lookback_days,
-                strategy=args.strategy,
-                bias=ctx.trade_bias,
-                cross_lookback=ctx.ema_macd_cross_lookback,
-                require_divergence=ctx.ema_macd_require_divergence,
-            )
+            if multi_symbol_bt:
+                df_trades, coverage_info = backtest_many(
+                    symbols_for_bt,
+                    args.timeframe,
+                    lookback_days=args.lookback_days,
+                    strategy=args.strategy,
+                    bias=ctx.trade_bias,
+                    cross_lookback=ctx.ema_macd_cross_lookback,
+                    require_divergence=ctx.ema_macd_require_divergence,
+                )
+            else:
+                df_trades, coverage_info = backtest_pair(
+                    symbols_for_bt[0],
+                    args.timeframe,
+                    lookback_days=args.lookback_days,
+                    strategy=args.strategy,
+                    bias=ctx.trade_bias,
+                    cross_lookback=ctx.ema_macd_cross_lookback,
+                    require_divergence=ctx.ema_macd_require_divergence,
+                )
+
             if df_trades is not None and not df_trades.empty:
-                print(df_trades.head())
-                df_trades.to_csv(f"backtest_{args.symbol.replace('/','_')}_{args.timeframe}_trades.csv", index=False)
-                logging.info("Backtest guardado em CSV")
+                preview = df_trades.head()
+                print(preview)
+                csv_name = (
+                    f"backtest_bundle_{args.timeframe}_trades.csv"
+                    if multi_symbol_bt
+                    else f"backtest_{symbols_for_bt[0].replace('/','_')}_{args.timeframe}_trades.csv"
+                )
+                df_trades.to_csv(csv_name, index=False)
+                logging.info("Backtest guardado em CSV (%s)", csv_name)
             write_backtest_summary(
-                args.symbol,
+                symbols_for_bt if multi_symbol_bt else symbols_for_bt[0],
                 args.timeframe,
                 args.lookback_days,
                 df_trades if df_trades is not None else pd.DataFrame(),
@@ -180,6 +239,10 @@ if __name__ == "__main__":
                     "risk_per_trade": ctx.simulation_risk_per_trade,
                     "ema_cross_lookback": ctx.ema_macd_cross_lookback,
                     "ema_require_divergence": ctx.ema_macd_require_divergence,
+                    "divergence_min_drop_pct": ctx.divergence_min_drop_pct,
+                    "ema_require_rsi_zone": ctx.ema_require_rsi_zone,
+                    "ema_rsi_zone_long_max": ctx.ema_rsi_zone_long_max,
+                    "ema_rsi_zone_short_min": ctx.ema_rsi_zone_short_min,
                     "trade_bias": ctx.trade_bias,
                     "strategy_mode": ctx.strategy_mode,
                     "environment": ctx.environment_mode,

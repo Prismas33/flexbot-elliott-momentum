@@ -24,6 +24,8 @@ def ema_macd_confirm_short(
     has_bearish_rsi_divergence,
     cross_lookback: int = 8,
     require_divergence: bool = True,
+    require_rsi_zone: bool = False,
+    rsi_zone_short_min: float = 70.0,
 ):
     """Analisa condições de venda para OMDs (versão short)."""
     if df is None or len(df) < max(ema_slow_period, ema_macd_slow) + 5:
@@ -74,8 +76,18 @@ def ema_macd_confirm_short(
 
     rsi_val = float(df['rsi'].iloc[-1]) if not np.isnan(df['rsi'].iloc[-1]) else None
     rsi_ok = True
-    if rsi_val is not None and (rsi_val < 22 or rsi_val > 78):
-        rsi_ok = False
+    rsi_zone_ok = True
+    if rsi_val is None:
+        if require_rsi_zone:
+            rsi_zone_ok = False
+            rsi_ok = False
+    else:
+        if require_rsi_zone:
+            rsi_zone_ok = rsi_val >= rsi_zone_short_min
+            rsi_ok = rsi_zone_ok
+        else:
+            if rsi_val < 18 or rsi_val > 82:
+                rsi_ok = False
 
     confluence = (
         (ema_cross_recent and macd_aligned) or
@@ -91,7 +103,8 @@ def ema_macd_confirm_short(
         atr_available and
         slope_ok and
         hist_ok and
-        rsi_ok
+        rsi_ok and
+        rsi_zone_ok
     )
 
     score = 3 if confirmed else 0
@@ -106,6 +119,7 @@ def ema_macd_confirm_short(
         "last_close": float(df['close'].iloc[-1]),
         "rsi": rsi_val,
         "rsi_ok": rsi_ok,
+        "rsi_zone_ok": rsi_zone_ok,
         "hist_ok": hist_ok,
         "slope_fast": float(slope_fast),
         "slope_slow": float(slope_slow),
@@ -114,6 +128,8 @@ def ema_macd_confirm_short(
         "has_divergence": has_divergence,
         "require_divergence": require_divergence,
         "divergence_ok": divergence_ok,
+        "require_rsi_zone": require_rsi_zone,
+        "rsi_zone_short_min": rsi_zone_short_min,
         "score": score,
     }
     if confirmed:

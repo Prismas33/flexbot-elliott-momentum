@@ -8,11 +8,13 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Tuple
 
 import streamlit as st
 import pandas as pd
 
 from elliott_momentum_breakout_bot import (
+    backtest_many,
     backtest_pair,
     fetch_account_balance,
     get_environment_mode,
@@ -408,6 +410,28 @@ with st.sidebar:
     require_default = config_data.get("ema_require_divergence")
     if not isinstance(require_default, bool):
         require_default = True
+    rsi_zone_default = config_data.get("ema_require_rsi_zone")
+    if not isinstance(rsi_zone_default, bool):
+        rsi_zone_default = ctx.ema_require_rsi_zone
+    configured_drop_pct = config_data.get("divergence_min_drop_pct")
+    try:
+        configured_drop_pct = float(configured_drop_pct)
+    except (TypeError, ValueError):
+        configured_drop_pct = ctx.divergence_min_drop_pct
+    configured_rsi_long_max = config_data.get("ema_rsi_zone_long_max", ctx.ema_rsi_zone_long_max)
+    try:
+        configured_rsi_long_max = float(configured_rsi_long_max)
+    except (TypeError, ValueError):
+        configured_rsi_long_max = ctx.ema_rsi_zone_long_max
+    configured_rsi_short_min = config_data.get("ema_rsi_zone_short_min", ctx.ema_rsi_zone_short_min)
+    try:
+        configured_rsi_short_min = float(configured_rsi_short_min)
+    except (TypeError, ValueError):
+        configured_rsi_short_min = ctx.ema_rsi_zone_short_min
+    if configured_drop_pct < 0:
+        configured_drop_pct = 0.0
+    drop_options = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+    closest_drop = min(drop_options, key=lambda opt: abs(opt - configured_drop_pct * 100))
     if strategy == "ema_macd":
         cross_lookback = st.slider("Velas para cruzamento OMDs", min_value=2, max_value=30, value=default_cross, step=1)
         require_divergence = st.checkbox(
@@ -415,16 +439,48 @@ with st.sidebar:
             value=require_default,
             help="Quando desmarcado, a confirmação OMDs aceita sinais sem divergência RSI.",
         )
+        require_rsi_zone = st.checkbox(
+            "Exigir RSI em zona (OMDs)",
+            value=rsi_zone_default,
+            help="Quando marcada, a confirmação OMDs só aceita sinais com RSI em zona definida (long ≤ limite, short ≥ limite).",
+        )
+        if require_rsi_zone:
+            rsi_long_max = 29.0
+            rsi_short_min = 70.0
+            st.caption("RSI em zona ativo: longs precisam de RSI ≤ 29 e shorts de RSI ≥ 70.")
+        else:
+            rsi_long_max = configured_rsi_long_max
+            rsi_short_min = configured_rsi_short_min
+        if require_divergence:
+            divergence_min_drop_choice = st.select_slider(
+                "Queda mínima para divergência (%)",
+                options=drop_options,
+                value=closest_drop,
+                help="Define o quanto o preço precisa recuar entre pivôs consecutivos para a divergência RSI ser considerada (0 desliga o filtro).",
+            )
+        else:
+            divergence_min_drop_choice = closest_drop
+            st.caption("Divergência desativada: filtro de queda mínima oculto.")
     else:
         cross_lookback = default_cross
         require_divergence = require_default
+        require_rsi_zone = rsi_zone_default
+        rsi_long_max = configured_rsi_long_max
+        rsi_short_min = configured_rsi_short_min
+        divergence_min_drop_choice = closest_drop
         st.caption("Parâmetros de cruzamento/divergência aplicam-se apenas à estratégia OMDs.")
+    divergence_min_drop_pct = max(0.0, float(divergence_min_drop_choice) / 100.0)
+    ctx.divergence_min_drop_pct = divergence_min_drop_pct
     if (
         config_data.get("symbol") != symbol
         or config_data.get("timeframe") != timeframe
         or config_data.get("trade_bias") != trade_bias
         or config_data.get("ema_cross_lookback") != cross_lookback
         or config_data.get("ema_require_divergence") != require_divergence
+        or config_data.get("ema_require_rsi_zone") != require_rsi_zone
+        or abs(configured_drop_pct - divergence_min_drop_pct) > 1e-9
+        or float(configured_rsi_long_max) != float(rsi_long_max)
+        or float(configured_rsi_short_min) != float(rsi_short_min)
         or config_data.get("risk_mode") != risk_mode_choice
         or abs(configured_risk_percent - risk_percent_value) > 1e-9
         or abs(configured_capital_base - capital_base_value) > 1e-9
@@ -439,6 +495,10 @@ with st.sidebar:
             trade_bias=trade_bias,
             ema_cross_lookback=cross_lookback,
             ema_require_divergence=require_divergence,
+            ema_require_rsi_zone=require_rsi_zone,
+            divergence_min_drop_pct=divergence_min_drop_pct,
+            ema_rsi_zone_long_max=rsi_long_max,
+            ema_rsi_zone_short_min=rsi_short_min,
             strategy_mode=strategy,
             risk_mode=risk_mode_choice,
             risk_percent=risk_percent_value,
@@ -451,6 +511,15 @@ with st.sidebar:
     ctx.strategy_mode = strategy
     ctx.set_multi_asset_enabled(multi_asset_enabled)
     ctx.set_active_pairs(active_pairs)
+    ctx.divergence_min_drop_pct = divergence_min_drop_pct
+    ctx.ema_require_rsi_zone = require_rsi_zone
+    ctx.ema_rsi_zone_long_max = rsi_long_max
+    ctx.ema_rsi_zone_short_min = rsi_short_min
+    symbols_for_backtest = (
+        tuple(dict.fromkeys(active_pairs))
+        if multi_asset_enabled and len(active_pairs) > 1
+        else (symbol,)
+    )
     if "pair_validation" not in st.session_state:
         st.session_state["pair_validation"] = None
     pair_to_validate = st.text_input("Validar par disponível na corretora", value=symbol)
@@ -660,42 +729,80 @@ if loop_feedback:
 st.markdown("</div>", unsafe_allow_html=True)
 
 @st.cache_data(show_spinner=False)
-def run_backtest(symbol: str, timeframe: str, lookback_days: int, strategy: str, bias: str, cross_lookback: int | None, require_divergence: bool | None):
-    df_trades, coverage = backtest_pair(
-        symbol,
-        timeframe,
-        lookback_days=lookback_days,
-        strategy=strategy,
-        bias=bias,
-        cross_lookback=cross_lookback,
-        require_divergence=require_divergence,
-    )
+def run_backtest(
+    symbols: Tuple[str, ...],
+    timeframe: str,
+    lookback_days: int,
+    strategy: str,
+    bias: str,
+    cross_lookback: int | None,
+    require_divergence: bool | None,
+    divergence_min_drop_pct: float,
+    require_rsi_zone: bool,
+    rsi_zone_long_max: float,
+    rsi_zone_short_min: float,
+):
+    multi = len(symbols) > 1
+    if abs(ctx.divergence_min_drop_pct - divergence_min_drop_pct) > 1e-12:
+        ctx.divergence_min_drop_pct = divergence_min_drop_pct
+    ctx.ema_require_rsi_zone = require_rsi_zone
+    ctx.ema_rsi_zone_long_max = rsi_zone_long_max
+    ctx.ema_rsi_zone_short_min = rsi_zone_short_min
+    if multi:
+        df_trades, coverage = backtest_many(
+            symbols,
+            timeframe,
+            lookback_days=lookback_days,
+            strategy=strategy,
+            bias=bias,
+            cross_lookback=cross_lookback,
+            require_divergence=require_divergence,
+        )
+    else:
+        df_trades, coverage = backtest_pair(
+            symbols[0],
+            timeframe,
+            lookback_days=lookback_days,
+            strategy=strategy,
+            bias=bias,
+            cross_lookback=cross_lookback,
+            require_divergence=require_divergence,
+        )
     if df_trades is None or df_trades.empty:
-        return None, coverage
+        return None, coverage, multi
     df_trades = df_trades.copy()
     if not pd.api.types.is_datetime64_any_dtype(df_trades["timestamp"]):
         df_trades["timestamp"] = pd.to_datetime(df_trades["timestamp"])
+    if "symbol" not in df_trades.columns:
+        df_trades["symbol"] = symbols[0]
+    df_trades.sort_values("timestamp", inplace=True)
     df_trades["cum_pnl"] = df_trades["pnl"].cumsum()
-    return df_trades, coverage
+    df_trades["cum_pnl_symbol"] = df_trades.groupby("symbol")["pnl"].cumsum()
+    return df_trades, coverage, multi
 
 backtest_tab, realtime_tab = st.tabs(["Backtest", "Tempo real"])
 
 with backtest_tab:
     if run_button:
+        symbol_display = ", ".join(symbols_for_backtest)
         with st.spinner(
-            f"Gerando backtest {symbol} {timeframe} (últimos {lookback_days} dias) — estratégia {strategy_display} | bias {bias_label.get(trade_bias, trade_bias)}"
+            f"Gerando backtest {symbol_display} {timeframe} (últimos {lookback_days} dias) — estratégia {strategy_display} | bias {bias_label.get(trade_bias, trade_bias)}"
             + (f" | cross {cross_lookback} velas" if strategy == "ema_macd" else "")
             + (" | divergência " + ("obrigatória" if require_divergence else "opcional") if strategy == "ema_macd" else "")
             + "..."
         ):
-                df, coverage = run_backtest(
-                    symbol,
+                df, coverage, multi_mode = run_backtest(
+                    symbols_for_backtest,
                     timeframe,
                     lookback_days,
                     strategy,
                     trade_bias,
                     cross_lookback if strategy == "ema_macd" else None,
                     require_divergence if strategy == "ema_macd" else None,
+                    divergence_min_drop_pct,
+                    require_rsi_zone,
+                    rsi_long_max,
+                    rsi_short_min,
                 )
         if df is None or df.empty:
             st.warning("Nenhuma operação encontrada para os parâmetros escolhidos.")
@@ -724,6 +831,7 @@ with backtest_tab:
             )
             st.markdown(f"<div class='metric-grid'>{cards_html}</div>", unsafe_allow_html=True)
             caption_parts = [
+                f"Ativos {symbol_display}" if multi_mode else f"Ativo {symbol_display}",
                 f"Simulação: capital inicial ${ctx.simulation_base_capital:.0f}",
                 f"risco {ctx.simulation_risk_per_trade*100:.0f}% por trade",
                 f"estratégia {strategy_display}",
@@ -732,6 +840,9 @@ with backtest_tab:
             if strategy == "ema_macd":
                 caption_parts.append(f"cross lookback {cross_lookback} velas")
                 caption_parts.append(f"divergência {'obrigatória' if require_divergence else 'opcional'}")
+                caption_parts.append(f"queda mínima {divergence_min_drop_choice:.1f}%")
+                if require_rsi_zone:
+                    caption_parts.append(f"RSI zone long ≤ {rsi_long_max:.0f} / short ≥ {rsi_short_min:.0f}")
             caption_parts.extend([
                 f"vitórias {len(wins)}",
                 f"derrotas {len(losses)}",
@@ -739,9 +850,39 @@ with backtest_tab:
             ])
             st.caption(" | ".join(caption_parts))
 
+            if multi_mode:
+                st.subheader("Resumo por ativo")
+                st.markdown("<div class='card-section'>", unsafe_allow_html=True)
+                per_symbol_rows = []
+                for sym, subset in df.groupby("symbol", sort=False):
+                    sym_wins = subset[subset["pnl"] > 0]
+                    sym_losses = subset[subset["pnl"] < 0]
+                    sym_breakevens = subset[subset["pnl"].abs() <= 1e-8]
+                    sym_eligible = len(sym_wins) + len(sym_losses)
+                    sym_winrate = (len(sym_wins) / sym_eligible) * 100 if sym_eligible else 0
+                    per_symbol_rows.append({
+                        "Ativo": sym,
+                        "Trades": len(subset),
+                        "Winrate %": round(sym_winrate, 2),
+                        "PnL total": round(subset["pnl"].sum(), 2),
+                        "Vitórias": len(sym_wins),
+                        "Derrotas": len(sym_losses),
+                        "Breakeven": len(sym_breakevens),
+                        "Avg Win": round(sym_wins["pnl"].mean(), 2) if not sym_wins.empty else 0.0,
+                        "Avg Loss": round(sym_losses["pnl"].mean(), 2) if not sym_losses.empty else 0.0,
+                    })
+                st.dataframe(pd.DataFrame(per_symbol_rows), use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
             st.subheader("Evolução do PnL cumulativo")
             st.markdown("<div class='card-section'>", unsafe_allow_html=True)
-            st.line_chart(df.set_index("timestamp")["cum_pnl"], use_container_width=True)
+            if multi_mode:
+                pnl_pivot = df.groupby(["timestamp", "symbol"], sort=True)["cum_pnl_symbol"].last().unstack()  # type: ignore[assignment]
+                pnl_pivot = pnl_pivot.sort_index()
+                pnl_pivot = pnl_pivot.ffill()
+                st.line_chart(pnl_pivot, use_container_width=True)
+            else:
+                st.line_chart(df.set_index("timestamp")["cum_pnl"], use_container_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
             st.subheader("Trades detalhados")
@@ -750,32 +891,69 @@ with backtest_tab:
             st.markdown("</div>", unsafe_allow_html=True)
 
             if coverage:
-                st.caption("Velas carregadas por timeframe")
+                st.caption("Velas carregadas")
                 st.markdown("<div class='card-section'>", unsafe_allow_html=True)
                 cov_rows = []
-                for tf, cov in coverage.items():
-                    if isinstance(cov, dict):
-                        cov_rows.append({
-                            "Timeframe": tf,
-                            "Candles": cov.get("candles"),
-                            "Inicio": cov.get("start"),
-                            "Fim": cov.get("end"),
-                            "Solicitado": cov.get("requested"),
-                        })
-                    else:
-                        cov_rows.append({
-                            "Timeframe": tf,
-                            "Candles": cov,
-                            "Inicio": None,
-                            "Fim": None,
-                            "Solicitado": None,
-                        })
+                if multi_mode:
+                    for sym, cov_map in coverage.items():
+                        if isinstance(cov_map, dict):
+                            for tf, cov in cov_map.items():
+                                if isinstance(cov, dict):
+                                    cov_rows.append({
+                                        "Ativo": sym,
+                                        "Timeframe": tf,
+                                        "Candles": cov.get("candles"),
+                                        "Inicio": cov.get("start"),
+                                        "Fim": cov.get("end"),
+                                        "Solicitado": cov.get("requested"),
+                                    })
+                                else:
+                                    cov_rows.append({
+                                        "Ativo": sym,
+                                        "Timeframe": tf,
+                                        "Candles": cov,
+                                        "Inicio": None,
+                                        "Fim": None,
+                                        "Solicitado": None,
+                                    })
+                        else:
+                            cov_rows.append({
+                                "Ativo": sym,
+                                "Timeframe": timeframe,
+                                "Candles": cov_map,
+                                "Inicio": None,
+                                "Fim": None,
+                                "Solicitado": None,
+                            })
+                else:
+                    for tf, cov in coverage.items():
+                        if isinstance(cov, dict):
+                            cov_rows.append({
+                                "Timeframe": tf,
+                                "Candles": cov.get("candles"),
+                                "Inicio": cov.get("start"),
+                                "Fim": cov.get("end"),
+                                "Solicitado": cov.get("requested"),
+                            })
+                        else:
+                            cov_rows.append({
+                                "Timeframe": tf,
+                                "Candles": cov,
+                                "Inicio": None,
+                                "Fim": None,
+                                "Solicitado": None,
+                            })
                 cov_df = pd.DataFrame(cov_rows)
                 st.dataframe(cov_df, use_container_width=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
             csv = df.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Exportar CSV", csv, file_name=f"backtest_{symbol.replace('/', '_')}_{timeframe}.csv", mime="text/csv")
+            download_name = (
+                f"backtest_bundle_{timeframe}.csv"
+                if multi_mode
+                else f"backtest_{symbol.replace('/', '_')}_{timeframe}.csv"
+            )
+            st.download_button("⬇️ Exportar CSV", csv, file_name=download_name, mime="text/csv")
     else:
         st.info("Defina os parâmetros e clique em 'Executar backtest' para ver os resultados.")
 

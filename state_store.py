@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 STATE_DIR = Path(".flexbot_state")
 STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -26,7 +26,7 @@ def write_runtime_state(open_positions: List[Dict[str, Any]], iteration_summary:
     }
     _write_json(RUNTIME_FILE, payload)
 
-def write_backtest_summary(symbol: str, timeframe: str, lookback_days: int, df_trades, coverage=None, simulation=None) -> None:
+def write_backtest_summary(symbol: str | Sequence[str], timeframe: str, lookback_days: int, df_trades, coverage=None, simulation=None) -> None:
     total_trades = len(df_trades) if df_trades is not None else 0
     wins = int(df_trades[df_trades['pnl'] > 0].shape[0]) if df_trades is not None else 0
     losses = int(df_trades[df_trades['pnl'] < 0].shape[0]) if df_trades is not None else 0
@@ -34,10 +34,15 @@ def write_backtest_summary(symbol: str, timeframe: str, lookback_days: int, df_t
     eligible = wins + losses
     winrate = (wins / eligible) if eligible else 0
     total_pnl = float(df_trades['pnl'].sum()) if df_trades is not None and len(df_trades) else 0.0
+    symbol_value: Any
+    if isinstance(symbol, str):
+        symbol_value = symbol
+    else:
+        symbol_value = list(symbol)
 
     summary = {
         "timestamp": datetime.utcnow().isoformat(),
-        "symbol": symbol,
+        "symbol": symbol_value,
         "timeframe": timeframe,
         "lookback_days": lookback_days,
         "trades": total_trades,
@@ -48,6 +53,8 @@ def write_backtest_summary(symbol: str, timeframe: str, lookback_days: int, df_t
         "total_pnl": total_pnl,
         "coverage": coverage or {},
     }
+    if not isinstance(symbol_value, str):
+        summary["symbols"] = symbol_value
     if simulation:
         summary["simulation"] = simulation
     _write_json(BACKTEST_FILE, {

@@ -57,6 +57,8 @@ def analyze_ema_macd_and_maybe_trade(symbol: str) -> Tuple[Optional[Dict[str, An
                 df,
                 cross_lookback=ctx.ema_macd_cross_lookback,
                 require_divergence=ctx.ema_macd_require_divergence,
+                require_rsi_zone=ctx.ema_require_rsi_zone,
+                rsi_zone_long_max=ctx.ema_rsi_zone_long_max,
             )
             long_info = {
                 "confirmed": confirmed_long,
@@ -89,6 +91,8 @@ def analyze_ema_macd_and_maybe_trade(symbol: str) -> Tuple[Optional[Dict[str, An
                 has_bearish_rsi_divergence=has_bearish_rsi_divergence,
                 cross_lookback=ctx.ema_macd_cross_lookback,
                 require_divergence=ctx.ema_macd_require_divergence,
+                require_rsi_zone=ctx.ema_require_rsi_zone,
+                rsi_zone_short_min=ctx.ema_rsi_zone_short_min,
             )
             if not confirmed_short and logging.getLogger().isEnabledFor(logging.DEBUG):
                 logging.debug(

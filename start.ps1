@@ -13,7 +13,12 @@ param(
     [switch]$AllowNoDivergence,
     [ValidateSet('DEBUG','INFO','WARNING','ERROR','CRITICAL')]
     [string]$LogLevel = 'INFO',
-    [switch]$NoPaper
+    [switch]$NoPaper,
+    [switch]$AllPairs,
+    [double]$DivergenceMinDrop = 1.5,
+    [switch]$RequireRsiZone,
+    [double]$RsiZoneLongMax = 29.0,
+    [double]$RsiZoneShortMin = 70.0
 )
 
 $pythonLauncher = "py -3.11"
@@ -75,9 +80,18 @@ $cmd += " --cross-lookback $CrossLookback"
 if ($AllowNoDivergence) {
     $cmd += " --allow-no-divergence"
 }
+$cmd += " --divergence-min-drop $DivergenceMinDrop"
 $cmd += " --log-level $LogLevel"
 if ($NoPaper) {
     $cmd += " --no-paper"
 }
+if ($AllPairs) {
+    $cmd += " --all-pairs"
+}
+if ($RequireRsiZone) {
+    $cmd += " --require-rsi-zone"
+}
+$cmd += " --rsi-zone-long-max $RsiZoneLongMax"
+$cmd += " --rsi-zone-short-min $RsiZoneShortMin"
 Write-Host "Running: $cmd"
 Invoke-Expression $cmd

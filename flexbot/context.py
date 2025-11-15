@@ -72,6 +72,10 @@ ema_macd_stop_atr = 1.8
 ema_macd_tp_atr = 5.4
 ema_macd_cross_lookback = 8
 ema_macd_require_divergence = True
+divergence_min_drop_pct = 0.015
+ema_require_rsi_zone = False
+ema_rsi_zone_long_max = 29.0
+ema_rsi_zone_short_min = 70.0
 
 trend_fast_span = 20
 trend_slow_span = 50
@@ -113,6 +117,31 @@ if isinstance(config_cross_lb, int) and config_cross_lb > 0:
 config_require_div = user_config.get("ema_require_divergence")
 if isinstance(config_require_div, bool):
     ema_macd_require_divergence = config_require_div
+
+config_divergence_drop = user_config.get("divergence_min_drop_pct")
+try:
+    if config_divergence_drop is not None:
+        divergence_min_drop_pct = max(0.0, float(config_divergence_drop))
+except (TypeError, ValueError):
+    pass
+
+config_require_rsi_zone = user_config.get("ema_require_rsi_zone")
+if isinstance(config_require_rsi_zone, bool):
+    ema_require_rsi_zone = config_require_rsi_zone
+
+config_rsi_long = user_config.get("ema_rsi_zone_long_max")
+try:
+    if config_rsi_long is not None:
+        ema_rsi_zone_long_max = float(config_rsi_long)
+except (TypeError, ValueError):
+    pass
+
+config_rsi_short = user_config.get("ema_rsi_zone_short_min")
+try:
+    if config_rsi_short is not None:
+        ema_rsi_zone_short_min = float(config_rsi_short)
+except (TypeError, ValueError):
+    pass
 
 config_risk_percent = user_config.get("risk_percent")
 try:
@@ -189,13 +218,37 @@ def update_environment_mode(mode: str) -> None:
 
 
 def override_from_cli(settings: Dict[str, object]) -> None:
-    global trade_bias, ema_macd_cross_lookback, ema_macd_require_divergence, strategy_mode, risk_percent, capital_base, risk_mode, leverage, active_pairs, multi_asset_enabled
+    global trade_bias, ema_macd_cross_lookback, ema_macd_require_divergence, strategy_mode, risk_percent, capital_base, risk_mode, leverage, active_pairs, multi_asset_enabled, divergence_min_drop_pct, ema_require_rsi_zone, ema_rsi_zone_long_max, ema_rsi_zone_short_min
     if "trade_bias" in settings and settings["trade_bias"] in ("long", "short", "both"):
         trade_bias = settings["trade_bias"]  # type: ignore[assignment]
     if "ema_cross_lookback" in settings and isinstance(settings["ema_cross_lookback"], int):
         ema_macd_cross_lookback = settings["ema_cross_lookback"]  # type: ignore[assignment]
     if "ema_require_divergence" in settings and isinstance(settings["ema_require_divergence"], bool):
         ema_macd_require_divergence = settings["ema_require_divergence"]  # type: ignore[assignment]
+    if "ema_require_rsi_zone" in settings and isinstance(settings["ema_require_rsi_zone"], bool):
+        ema_require_rsi_zone = settings["ema_require_rsi_zone"]  # type: ignore[assignment]
+    if "divergence_min_drop_pct" in settings:
+        try:
+            val = float(settings["divergence_min_drop_pct"])
+        except (TypeError, ValueError):
+            pass
+        else:
+            if val >= 0:
+                divergence_min_drop_pct = val  # type: ignore[assignment]
+    if "ema_rsi_zone_long_max" in settings:
+        try:
+            val = float(settings["ema_rsi_zone_long_max"])
+        except (TypeError, ValueError):
+            pass
+        else:
+            ema_rsi_zone_long_max = val  # type: ignore[assignment]
+    if "ema_rsi_zone_short_min" in settings:
+        try:
+            val = float(settings["ema_rsi_zone_short_min"])
+        except (TypeError, ValueError):
+            pass
+        else:
+            ema_rsi_zone_short_min = val  # type: ignore[assignment]
     if "strategy_mode" in settings and settings["strategy_mode"] in ("momentum", "ema_macd"):
         strategy_mode = settings["strategy_mode"]  # type: ignore[assignment]
     if "risk_percent" in settings:

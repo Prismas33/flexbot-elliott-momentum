@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -14,7 +14,7 @@ from .strategies import momentum_confirm_long, momentum_confirm_short
 from .strategies.ema_macd import ema_macd_confirm
 from .strategies.ema_macd_short import ema_macd_confirm_short
 
-__all__ = ["simulate_trade_on_series", "backtest_pair"]
+__all__ = ["simulate_trade_on_series", "backtest_pair", "backtest_many"]
 
 fetch_backtest_series = data.fetch_backtest_series
 timeframe_to_minutes = data.timeframe_to_minutes
@@ -291,6 +291,7 @@ def backtest_pair(symbol: str, timeframe: str, lookback_days: int = 90, strategy
                         slice_df,
                         cross_lookback=cross_lb,
                         require_divergence=divergence_required,
+                        require_rsi_zone=ctx.ema_require_rsi_zone,
                     )
                     if not confirmed_long or not details_long.get("atr"):
                         continue
@@ -337,6 +338,8 @@ def backtest_pair(symbol: str, timeframe: str, lookback_days: int = 90, strategy
                         has_bearish_rsi_divergence=has_bearish_rsi_divergence,
                         cross_lookback=cross_lb,
                         require_divergence=divergence_required,
+                        require_rsi_zone=ctx.ema_require_rsi_zone,
+                        rsi_zone_short_min=ctx.ema_rsi_zone_short_min,
                     )
                     if not confirmed_short and logging.getLogger().isEnabledFor(logging.DEBUG):
                         logging.debug(
@@ -479,3 +482,41 @@ def backtest_pair(symbol: str, timeframe: str, lookback_days: int = 90, strategy
         len(df_trades), winrate, total_pnl, avg_win, avg_loss, len(breakevens)
     )
     return df_trades, coverage_info
+
+
+def backtest_many(
+    symbols: Sequence[str],
+    timeframe: str,
+    lookback_days: int = 90,
+    *,
+    strategy: Optional[str] = None,
+    bias: Optional[str] = None,
+    cross_lookback: Optional[int] = None,
+    require_divergence: Optional[bool] = None,
+) -> Tuple[pd.DataFrame, Dict[str, object]]:
+    """Runs backtests sequentially for multiple symbols and aggregates the results."""
+    aggregated: List[pd.DataFrame] = []
+    coverage_bundle: Dict[str, object] = {}
+    for symbol in symbols:
+        df_trades, coverage = backtest_pair(
+            symbol,
+            timeframe,
+            lookback_days=lookback_days,
+            strategy=strategy,
+            bias=bias,
+            cross_lookback=cross_lookback,
+            require_divergence=require_divergence,
+        )
+        coverage_bundle[symbol] = coverage
+        if df_trades is None or df_trades.empty:
+            continue
+        df_copy = df_trades.copy()
+        df_copy["symbol"] = symbol
+        aggregated.append(df_copy)
+    if not aggregated:
+        return pd.DataFrame(), coverage_bundle
+    combined = pd.concat(aggregated, ignore_index=True)
+    if "timestamp" in combined.columns:
+        combined.sort_values("timestamp", inplace=True)
+        combined.reset_index(drop=True, inplace=True)
+    return combined, coverage_bundle
