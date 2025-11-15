@@ -1,5 +1,11 @@
+"""EMA+MACD long-side confirmation logic."""
+
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
+
+__all__ = ["ema_macd_confirm_long"]
 
 
 def ema_macd_confirm_long(

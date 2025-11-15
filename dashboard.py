@@ -262,10 +262,46 @@ with st.sidebar:
         st.metric("Saldo estimado", f"${st.session_state['account_balance']:.2f}")
         st.caption("Valor estimado reportado pela corretora; se estiver em paper/fallback, o total padrão é $10.000.")
 
+    multi_asset_default = config_data.get("multi_asset_enabled")
+    if not isinstance(multi_asset_default, bool):
+        multi_asset_default = getattr(ctx, "multi_asset_enabled", True)
+    multi_asset_enabled = st.checkbox(
+        "Monitorizar múltiplos ativos",
+        value=multi_asset_default,
+        help="Quando desativado, o loop acompanha apenas o par selecionado acima.",
+    )
+
     default_symbol = config_data.get("symbol")
     available_pairs = list(ctx.pairs)
     symbol_index = available_pairs.index(default_symbol) if isinstance(default_symbol, str) and default_symbol in available_pairs else 0
-    symbol = st.selectbox("Par", options=available_pairs, index=symbol_index)
+    pair_label = "Par principal" if multi_asset_enabled else "Par"
+    pair_help = "Define o par usado como referência (ex.: backtests e valores padrão)." if multi_asset_enabled else "Seleciona o par que o loop vai acompanhar."
+    symbol = st.selectbox(pair_label, options=available_pairs, index=symbol_index, help=pair_help)
+
+    configured_active_pairs = config_data.get("active_pairs")
+    if not isinstance(configured_active_pairs, list) or not configured_active_pairs:
+        configured_active_pairs = list(ctx.active_pairs)
+    configured_active_pairs = [p for p in configured_active_pairs if p in available_pairs]
+    if not configured_active_pairs:
+        configured_active_pairs = available_pairs[:3]
+    if symbol not in configured_active_pairs:
+        configured_active_pairs = [symbol] + [p for p in configured_active_pairs if p != symbol]
+
+    if multi_asset_enabled:
+        active_pairs = st.multiselect(
+            "Ativos monitorizados",
+            options=available_pairs,
+            default=configured_active_pairs,
+            help="Lista de pares que o loop live irá monitorizar. Mantemos no máximo um trade aberto por par.",
+        )
+        if not active_pairs:
+            st.warning("Selecione pelo menos um par para o loop.")
+            active_pairs = configured_active_pairs
+        if symbol not in active_pairs:
+            st.info("Par principal adicionado automaticamente à lista de monitorização.")
+            active_pairs = [symbol] + [p for p in active_pairs if p != symbol]
+    else:
+        active_pairs = [symbol]
     default_timeframe = config_data.get("timeframe")
     available_timeframes = list(ctx.timeframes)
     default_tf_index = available_timeframes.index(default_timeframe) if isinstance(default_timeframe, str) and default_timeframe in available_timeframes else 1 if len(available_timeframes) > 1 else 0
@@ -372,6 +408,8 @@ with st.sidebar:
         or abs(configured_risk_percent - risk_percent_value) > 1e-9
         or abs(configured_capital_base - capital_base_value) > 1e-9
         or abs(configured_leverage - leverage_value) > 1e-9
+        or set(config_data.get("active_pairs", [])) != set(active_pairs)
+        or config_data.get("multi_asset_enabled") != multi_asset_enabled
     ):
         config_data = update_user_config(
             symbol=symbol,
@@ -383,7 +421,12 @@ with st.sidebar:
             risk_percent=risk_percent_value,
             capital_base=capital_base_value,
             leverage=leverage_value,
+            active_pairs=active_pairs,
+            multi_asset_enabled=multi_asset_enabled,
         )
+
+    ctx.set_multi_asset_enabled(multi_asset_enabled)
+    ctx.set_active_pairs(active_pairs)
     if "pair_validation" not in st.session_state:
         st.session_state["pair_validation"] = None
     pair_to_validate = st.text_input("Validar par disponível na corretora", value=symbol)
@@ -411,6 +454,12 @@ risk_badge_label = (
     else f"Risco {risk_percent_value*100:.1f}% · Base {capital_base_value:.0f}"
 )
 leverage_badge_label = f"Lev {leverage_value:.1f}x"
+if multi_asset_enabled:
+    assets_badge_label = ", ".join(active_pairs[:3]) + ("…" if len(active_pairs) > 3 else "")
+    assets_badge_title = "Ativos"
+else:
+    assets_badge_label = symbol
+    assets_badge_title = "Ativo"
 summary_html = f"""
 <div class='hero-card'>
     <div>
@@ -422,6 +471,7 @@ summary_html = f"""
         <span class='status-pill slim'>Divergência {divergence_badge}</span>
         <span class='status-pill slim'>Bias {bias_label.get(trade_bias, trade_bias)}</span>
         <span class='status-pill slim'>{risk_badge_label}</span>
+        <span class='status-pill slim'>{assets_badge_title} {assets_badge_label}</span>
         <span class='status-pill slim'>{leverage_badge_label}</span>
     </div>
 </div>
@@ -489,12 +539,11 @@ with stop_col:
 
 loop_feedback = None
 if start_clicked:
+    monitored_pairs = active_pairs if active_pairs else list(ctx.active_pairs)
     command = [
         sys.executable,
         "elliott_momentum_breakout_bot.py",
         "--live",
-        "--symbol",
-        symbol,
         "--timeframe",
         timeframe,
         "--strategy",
@@ -503,7 +552,10 @@ if start_clicked:
         trade_bias,
         "--cross-lookback",
         str(cross_lookback),
+        "--all-pairs",
     ]
+    if symbol:
+        command.extend(["--symbol", symbol])
     command.append("--require-divergence" if require_divergence else "--allow-no-divergence")
     command.append("--paper-mode" if env_choice == "paper" else "--no-paper")
 
@@ -515,7 +567,7 @@ if start_clicked:
         started_meta = {
             "pid": process.pid,
             "symbol": symbol,
-            "symbols": [symbol],
+            "symbols": monitored_pairs,
             "timeframe": timeframe,
             "entry_timeframes": [timeframe],
             "environment": env_choice,

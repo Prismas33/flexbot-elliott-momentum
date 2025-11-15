@@ -1,6 +1,6 @@
 import os
 import logging
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 import ccxt
 from dotenv import load_dotenv
@@ -21,10 +21,19 @@ leverage = 5.0
 
 timeframes = ["5m", "15m", "1h", "4h", "1d"]
 pairs = [
-    "ETH/USDC:USDC",
     "BTC/USDC:USDC",
+    "ETH/USDC:USDC",
     "SOL/USDC:USDC",
+    "XRP/USDC:USDC",
+    "ADA/USDC:USDC",
+    "LINK/USDC:USDC",
+    "AVAX/USDC:USDC",
+    "MATIC/USDC:USDC",
+    "APT/USDC:USDC",
+    "DOGE/USDC:USDC",
 ]
+active_pairs = pairs[:3]
+multi_asset_enabled = True
 entry_timeframes = list(timeframes)
 
 simulation_base_capital = 100.0
@@ -130,6 +139,16 @@ try:
 except (TypeError, ValueError):
     pass
 
+config_active_pairs = user_config.get("active_pairs")
+if isinstance(config_active_pairs, Sequence) and not isinstance(config_active_pairs, (str, bytes)):
+    filtered = [p for p in config_active_pairs if p in pairs]
+    if filtered:
+        active_pairs = list(dict.fromkeys(filtered))
+
+config_multi_asset = user_config.get("multi_asset_enabled")
+if isinstance(config_multi_asset, bool):
+    multi_asset_enabled = config_multi_asset
+
 exchange_class = getattr(ccxt, exchange_id)
 exchange = exchange_class({
     "apiKey": API_KEY,
@@ -170,7 +189,7 @@ def update_environment_mode(mode: str) -> None:
 
 
 def override_from_cli(settings: Dict[str, object]) -> None:
-    global trade_bias, ema_macd_cross_lookback, ema_macd_require_divergence, strategy_mode, risk_percent, capital_base, risk_mode, leverage
+    global trade_bias, ema_macd_cross_lookback, ema_macd_require_divergence, strategy_mode, risk_percent, capital_base, risk_mode, leverage, active_pairs, multi_asset_enabled
     if "trade_bias" in settings and settings["trade_bias"] in ("long", "short", "both"):
         trade_bias = settings["trade_bias"]  # type: ignore[assignment]
     if "ema_cross_lookback" in settings and isinstance(settings["ema_cross_lookback"], int):
@@ -205,3 +224,28 @@ def override_from_cli(settings: Dict[str, object]) -> None:
         else:
             if val >= 1:
                 leverage = max(1.0, val)  # type: ignore[assignment]
+    if "active_pairs" in settings:
+        seq = settings["active_pairs"]
+        if isinstance(seq, Sequence) and not isinstance(seq, (str, bytes)):
+            selected = [p for p in seq if p in pairs]
+            if selected:
+                active_pairs = list(dict.fromkeys(selected))  # type: ignore[assignment]
+    if "multi_asset_enabled" in settings and isinstance(settings["multi_asset_enabled"], bool):
+        multi_asset_enabled = settings["multi_asset_enabled"]  # type: ignore[assignment]
+
+
+def set_active_pairs(selected: Sequence[str] | None) -> None:
+    global active_pairs
+    if not selected:
+        if not multi_asset_enabled and pairs:
+            active_pairs = [pairs[0]]
+        else:
+            active_pairs = pairs[:3]
+        return
+    filtered = [p for p in selected if p in pairs]
+    active_pairs = list(dict.fromkeys(filtered)) if filtered else pairs[:3]
+
+
+def set_multi_asset_enabled(flag: bool) -> None:
+    global multi_asset_enabled
+    multi_asset_enabled = bool(flag)
