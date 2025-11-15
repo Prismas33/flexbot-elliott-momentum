@@ -88,6 +88,88 @@ def update_user_config(**kwargs: Any) -> Dict[str, Any]:
     return config
 
 
+def _ensure_strategy_buckets(presets: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    structured: Dict[str, Dict[str, Any]] = {}
+    malformed_keys = [k for k, v in presets.items() if isinstance(k, str) and isinstance(v, dict) and "strategy_mode" in v]
+    if malformed_keys:
+        for key in malformed_keys:
+            payload = presets[key]
+            strategy = payload.get("strategy_mode", "unknown")
+            structured.setdefault(strategy, {})[key] = payload
+    for key, value in presets.items():
+        if key in malformed_keys:
+            continue
+        if isinstance(value, dict):
+            structured[key] = {tf: cfg for tf, cfg in value.items() if isinstance(cfg, dict)}
+    return structured
+
+
+def get_timeframe_preset(timeframe: str, strategy: str | None = None) -> Dict[str, Any] | None:
+    config = read_user_config()
+    presets = config.get("presets")
+    if not isinstance(presets, dict):
+        return None
+    preset_map = _ensure_strategy_buckets(presets)
+    if strategy is None:
+        strategy = config.get("strategy_mode")
+    if strategy is None:
+        return None
+    bucket = preset_map.get(strategy)
+    if isinstance(bucket, dict):
+        preset = bucket.get(timeframe)
+        if isinstance(preset, dict):
+            return preset
+    return None
+
+
+def get_timeframe_presets(strategy: str | None = None) -> Dict[str, Dict[str, Any]]:
+    config = read_user_config()
+    presets = config.get("presets")
+    if not isinstance(presets, dict):
+        return {}
+    preset_map = _ensure_strategy_buckets(presets)
+    if strategy is None:
+        return preset_map
+    bucket = preset_map.get(strategy)
+    if isinstance(bucket, dict):
+        return bucket
+    return {}
+
+
+def save_timeframe_preset(timeframe: str, preset: Dict[str, Any]) -> Dict[str, Any]:
+    config = read_user_config()
+    presets = config.get("presets")
+    if not isinstance(presets, dict):
+        presets = {}
+    preset_map = _ensure_strategy_buckets(presets)
+    strategy = preset.get("strategy_mode", config.get("strategy_mode", "unknown"))
+    bucket = preset_map.setdefault(strategy, {})
+    bucket[timeframe] = preset
+    config["presets"] = preset_map
+    write_user_config(config)
+    return preset
+
+
+def delete_timeframe_preset(timeframe: str, strategy: str | None = None) -> None:
+    config = read_user_config()
+    presets = config.get("presets")
+    if not isinstance(presets, dict):
+        return
+    preset_map = _ensure_strategy_buckets(presets)
+    if strategy is None:
+        strategy = config.get("strategy_mode")
+    if strategy is None:
+        return
+    bucket = preset_map.get(strategy)
+    if not isinstance(bucket, dict):
+        return
+    if timeframe in bucket:
+        bucket.pop(timeframe, None)
+        preset_map[strategy] = bucket
+        config["presets"] = preset_map
+        write_user_config(config)
+
+
 def read_control_state() -> Dict[str, Any]:
     if not CONTROL_FILE.exists():
         return {}

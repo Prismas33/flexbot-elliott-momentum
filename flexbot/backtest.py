@@ -28,7 +28,18 @@ compute_rsi = indicators.compute_rsi
 compute_macd = indicators.compute_macd
 
 
-def simulate_trade_on_series(df: pd.DataFrame, entry_idx: int, entry_side: str, sl_price: float, tp_price: float, entry_price: Optional[float] = None):
+def simulate_trade_on_series(
+    df: pd.DataFrame,
+    entry_idx: int,
+    entry_side: str,
+    sl_price: float,
+    tp_price: float,
+    entry_price: Optional[float] = None,
+    *,
+    use_trailing: Optional[bool] = None,
+    trailing_rr: Optional[float] = None,
+    trailing_activate_rr: Optional[float] = None,
+):
     """Replays candles after entry to determine exit outcome for a single trade."""
     n = len(df)
     entry_ref_price = entry_price if entry_price is not None else df['close'].iloc[entry_idx]
@@ -40,6 +51,15 @@ def simulate_trade_on_series(df: pd.DataFrame, entry_idx: int, entry_side: str, 
     partial_done = False
     be_moved = False
     current_sl = sl_price
+    partial_rr = ctx.take_partial_rr if ctx.take_partial_rr > 0 else None
+
+    trailing_enabled = bool(use_trailing)
+    trailing_distance_rr = max(
+        0.1,
+        float(trailing_rr) if trailing_rr is not None else ctx.ema_macd_trailing_rr,
+    )
+    trailing_activate = float(trailing_activate_rr) if trailing_activate_rr is not None else ctx.ema_macd_trailing_activate_rr
+    trailing_started = False
 
     for i in range(entry_idx + 1, n):
         high = df['high'].iloc[i]
@@ -51,13 +71,22 @@ def simulate_trade_on_series(df: pd.DataFrame, entry_idx: int, entry_side: str, 
             if (not be_moved) and rr_reached >= ctx.break_even_rr:
                 current_sl = entry_ref_price
                 be_moved = True
-            if (not partial_done) and rr_reached >= ctx.take_partial_rr:
+            if partial_rr is not None and (not partial_done) and rr_reached >= partial_rr:
                 partial_done = True
-            hit_tp = (high >= tp_price)
+            if trailing_enabled and rr_reached >= trailing_activate:
+                trailing_started = True
+                trailing_distance = trailing_distance_rr * risk_per_unit
+                candidate_stop = max_price - trailing_distance
+                if be_moved:
+                    candidate_stop = max(candidate_stop, entry_ref_price)
+                candidate_stop = max(candidate_stop, current_sl)
+                if candidate_stop > current_sl:
+                    current_sl = candidate_stop
+            hit_tp = (high >= tp_price) if (tp_price is not None and not trailing_started) else False
             hit_sl = (low <= current_sl)
             if hit_tp and not hit_sl:
-                if partial_done:
-                    price_partial = entry_ref_price + ctx.take_partial_rr * risk_per_unit
+                if partial_done and partial_rr is not None:
+                    price_partial = entry_ref_price + partial_rr * risk_per_unit
                     pnl_partial = (price_partial - entry_ref_price) * 0.5
                     pnl_rest = (tp_price - entry_ref_price) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -65,8 +94,8 @@ def simulate_trade_on_series(df: pd.DataFrame, entry_idx: int, entry_side: str, 
                     pnl_total = tp_price - entry_ref_price
                 return {"exit_price": tp_price, "exit_idx": i, "outcome": "tp", "pnl": pnl_total}
             if hit_sl and not hit_tp:
-                if partial_done:
-                    price_partial = entry_ref_price + ctx.take_partial_rr * risk_per_unit
+                if partial_done and partial_rr is not None:
+                    price_partial = entry_ref_price + partial_rr * risk_per_unit
                     pnl_partial = (price_partial - entry_ref_price) * 0.5
                     pnl_rest = (current_sl - entry_ref_price) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -75,12 +104,12 @@ def simulate_trade_on_series(df: pd.DataFrame, entry_idx: int, entry_side: str, 
                 return {"exit_price": current_sl, "exit_idx": i, "outcome": "sl", "pnl": pnl_total}
             if hit_tp and hit_sl:
                 o = df['open'].iloc[i]
-                dist_tp = abs(tp_price - o)
+                dist_tp = abs(tp_price - o) if tp_price is not None else float('inf')
                 dist_sl = abs(current_sl - o)
                 outcome = "tp" if dist_tp <= dist_sl else "sl"
-                exit_price = tp_price if outcome == "tp" else current_sl
-                if partial_done:
-                    price_partial = entry_ref_price + ctx.take_partial_rr * risk_per_unit
+                exit_price = tp_price if (outcome == "tp" and tp_price is not None) else current_sl
+                if partial_done and partial_rr is not None:
+                    price_partial = entry_ref_price + partial_rr * risk_per_unit
                     pnl_partial = (price_partial - entry_ref_price) * 0.5
                     pnl_rest = (exit_price - entry_ref_price) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -93,13 +122,22 @@ def simulate_trade_on_series(df: pd.DataFrame, entry_idx: int, entry_side: str, 
             if (not be_moved) and rr_reached >= ctx.break_even_rr:
                 current_sl = entry_ref_price
                 be_moved = True
-            if (not partial_done) and rr_reached >= ctx.take_partial_rr:
+            if partial_rr is not None and (not partial_done) and rr_reached >= partial_rr:
                 partial_done = True
-            hit_tp = (low <= tp_price)
+            if trailing_enabled and rr_reached >= trailing_activate:
+                trailing_started = True
+                trailing_distance = trailing_distance_rr * risk_per_unit
+                candidate_stop = min_price + trailing_distance
+                if be_moved:
+                    candidate_stop = min(candidate_stop, entry_ref_price)
+                candidate_stop = min(candidate_stop, current_sl)
+                if candidate_stop < current_sl:
+                    current_sl = candidate_stop
+            hit_tp = (low <= tp_price) if (tp_price is not None and not trailing_started) else False
             hit_sl = (high >= current_sl)
             if hit_tp and not hit_sl:
-                if partial_done:
-                    price_partial = entry_ref_price - ctx.take_partial_rr * risk_per_unit
+                if partial_done and partial_rr is not None:
+                    price_partial = entry_ref_price - partial_rr * risk_per_unit
                     pnl_partial = (entry_ref_price - price_partial) * 0.5
                     pnl_rest = (entry_ref_price - tp_price) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -107,8 +145,8 @@ def simulate_trade_on_series(df: pd.DataFrame, entry_idx: int, entry_side: str, 
                     pnl_total = entry_ref_price - tp_price
                 return {"exit_price": tp_price, "exit_idx": i, "outcome": "tp", "pnl": pnl_total}
             if hit_sl and not hit_tp:
-                if partial_done:
-                    price_partial = entry_ref_price - ctx.take_partial_rr * risk_per_unit
+                if partial_done and partial_rr is not None:
+                    price_partial = entry_ref_price - partial_rr * risk_per_unit
                     pnl_partial = (entry_ref_price - price_partial) * 0.5
                     pnl_rest = (entry_ref_price - current_sl) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -117,12 +155,12 @@ def simulate_trade_on_series(df: pd.DataFrame, entry_idx: int, entry_side: str, 
                 return {"exit_price": current_sl, "exit_idx": i, "outcome": "sl", "pnl": pnl_total}
             if hit_tp and hit_sl:
                 o = df['open'].iloc[i]
-                dist_tp = abs(o - tp_price)
+                dist_tp = abs(o - tp_price) if tp_price is not None else float('inf')
                 dist_sl = abs(o - current_sl)
                 outcome = "tp" if dist_tp <= dist_sl else "sl"
-                exit_price = tp_price if outcome == "tp" else current_sl
-                if partial_done:
-                    price_partial = entry_ref_price - ctx.take_partial_rr * risk_per_unit
+                exit_price = tp_price if (outcome == "tp" and tp_price is not None) else current_sl
+                if partial_done and partial_rr is not None:
+                    price_partial = entry_ref_price - partial_rr * risk_per_unit
                     pnl_partial = (entry_ref_price - price_partial) * 0.5
                     pnl_rest = (entry_ref_price - exit_price) * 0.5
                     pnl_total = pnl_partial + pnl_rest
@@ -132,16 +170,16 @@ def simulate_trade_on_series(df: pd.DataFrame, entry_idx: int, entry_side: str, 
 
     final_price = df['close'].iloc[-1]
     if entry_side == 'buy':
-        if partial_done:
-            price_partial = entry_ref_price + ctx.take_partial_rr * risk_per_unit
+        if partial_done and partial_rr is not None:
+            price_partial = entry_ref_price + partial_rr * risk_per_unit
             pnl_partial = (price_partial - entry_ref_price) * 0.5
             pnl_rest = (final_price - entry_ref_price) * 0.5
             pnl_total = pnl_partial + pnl_rest
         else:
             pnl_total = final_price - entry_ref_price
     else:
-        if partial_done:
-            price_partial = entry_ref_price - ctx.take_partial_rr * risk_per_unit
+        if partial_done and partial_rr is not None:
+            price_partial = entry_ref_price - partial_rr * risk_per_unit
             pnl_partial = (entry_ref_price - price_partial) * 0.5
             pnl_rest = (entry_ref_price - final_price) * 0.5
             pnl_total = pnl_partial + pnl_rest
@@ -169,8 +207,17 @@ def backtest_pair(symbol: str, timeframe: str, lookback_days: int = 90, strategy
     sim_risk = ctx.simulation_risk_per_trade
     current_equity = ctx.simulation_base_capital
 
-    slice_store = {}
-    for tf in ctx.timeframes:
+    required_timeframes: List[str] = [timeframe]
+    parent = ctx.get_bias_parent(timeframe)
+    while parent and parent not in required_timeframes:
+        required_timeframes.append(parent)
+        next_parent = ctx.get_bias_parent(parent)
+        if next_parent == parent:
+            break
+        parent = next_parent
+
+    slice_store: Dict[str, pd.DataFrame | None] = {}
+    for tf in required_timeframes:
         tf_minutes = timeframe_to_minutes(tf)
         candles_tf = int((24 * 60 / tf_minutes) * lookback_days) + 200
         if tf == timeframe:
@@ -194,7 +241,9 @@ def backtest_pair(symbol: str, timeframe: str, lookback_days: int = 90, strategy
                 continue
             d = dfrag[dfrag.index <= ts].tail(ctx.lookback)
             slices[tf] = d if len(d) >= 60 else None
-        bias_snapshot = {tf: bias_from_slices(tf, ts, slice_store) for tf in ctx.timeframes}
+        bias_snapshot = {}
+        for tf_key in required_timeframes:
+            bias_snapshot[tf_key] = bias_from_slices(tf_key, ts, slice_store)
         selected_trade = None
 
         if strategy == "momentum":
@@ -209,8 +258,20 @@ def backtest_pair(symbol: str, timeframe: str, lookback_days: int = 90, strategy
                 if effective_bias in ("long", "both"):
                     has_div_long = has_bullish_rsi_divergence(slice_df)
                     confirmed_long, details_long = momentum_confirm_long(slice_df)
-                    if confirmed_long and has_div_long:
+                    if details_long is None:
+                        details_long = {}
+                    details_long["has_divergence"] = has_div_long
+                    details_long["require_divergence"] = ctx.momentum_require_divergence
+                    divergence_ok_long = has_div_long or not ctx.momentum_require_divergence
+                    details_long["divergence_ok"] = divergence_ok_long
+                    bonus_applied_long = False
+                    if confirmed_long and ctx.momentum_use_divergence_bonus and has_div_long:
                         details_long["score"] = details_long.get("score", 0) + 1.0
+                        bonus_applied_long = True
+                    details_long["divergence_bonus_applied"] = bonus_applied_long
+                    if confirmed_long and not divergence_ok_long:
+                        confirmed_long = False
+                        details_long["divergence_blocked"] = True
                     if confirmed_long and bias_dir == "down" and details_long.get("score", 0) < ctx.momentum_bias_override_score:
                         confirmed_long = False
                     if confirmed_long and details_long.get("atr"):
@@ -218,8 +279,20 @@ def backtest_pair(symbol: str, timeframe: str, lookback_days: int = 90, strategy
                 if effective_bias in ("short", "both"):
                     has_div_short = has_bearish_rsi_divergence(slice_df)
                     confirmed_short, details_short = momentum_confirm_short(slice_df)
-                    if confirmed_short and has_div_short:
+                    if details_short is None:
+                        details_short = {}
+                    details_short["has_divergence"] = has_div_short
+                    details_short["require_divergence"] = ctx.momentum_require_divergence
+                    divergence_ok_short = has_div_short or not ctx.momentum_require_divergence
+                    details_short["divergence_ok"] = divergence_ok_short
+                    bonus_applied_short = False
+                    if confirmed_short and ctx.momentum_use_divergence_bonus and has_div_short:
                         details_short["score"] = details_short.get("score", 0) + 1.0
+                        bonus_applied_short = True
+                    details_short["divergence_bonus_applied"] = bonus_applied_short
+                    if confirmed_short and not divergence_ok_short:
+                        confirmed_short = False
+                        details_short["divergence_blocked"] = True
                     if confirmed_short and bias_dir == "up" and details_short.get("score", 0) < ctx.momentum_bias_override_score:
                         confirmed_short = False
                     if confirmed_short and details_short.get("atr"):
@@ -413,7 +486,28 @@ def backtest_pair(symbol: str, timeframe: str, lookback_days: int = 90, strategy
         if position_size <= 0:
             i += 1
             continue
-        outcome = simulate_trade_on_series(df_main, entry_idx, entry_side, stop_price, tp_price, entry_price)
+        trailing_for_trade = False
+        trailing_rr_value = None
+        trailing_activate_value = None
+        if risk_key.startswith("ema"):
+            trailing_for_trade = ctx.ema_macd_use_trailing
+            trailing_rr_value = ctx.ema_macd_trailing_rr
+            trailing_activate_value = ctx.ema_macd_trailing_activate_rr
+        elif risk_key.startswith("momentum"):
+            trailing_for_trade = ctx.momentum_use_trailing
+            trailing_rr_value = ctx.momentum_trailing_rr
+            trailing_activate_value = ctx.momentum_trailing_activate_rr
+        outcome = simulate_trade_on_series(
+            df_main,
+            entry_idx,
+            entry_side,
+            stop_price,
+            tp_price,
+            entry_price,
+            use_trailing=trailing_for_trade,
+            trailing_rr=trailing_rr_value,
+            trailing_activate_rr=trailing_activate_value,
+        )
         pnl_price = outcome['pnl']
         pnl_value = pnl_price * position_size
         risk_per_unit = abs(stop_price - entry_price)

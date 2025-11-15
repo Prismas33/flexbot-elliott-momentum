@@ -67,7 +67,28 @@ if __name__ == "__main__":
     rsi_zone_group.set_defaults(require_rsi_zone=ctx.ema_require_rsi_zone)
     parser.add_argument('--rsi-zone-long-max', dest='rsi_zone_long_max', type=float, default=ctx.ema_rsi_zone_long_max, help='Máximo de RSI permitido para entradas long quando a validação de zona está ativa.')
     parser.add_argument('--rsi-zone-short-min', dest='rsi_zone_short_min', type=float, default=ctx.ema_rsi_zone_short_min, help='Mínimo de RSI permitido para entradas short quando a validação de zona está ativa.')
+    trailing_group = parser.add_mutually_exclusive_group()
+    trailing_group.add_argument('--ema-enable-trailing', dest='ema_use_trailing', action='store_true', help='Ativa trailing stop dinâmico após o trade atingir o RR configurado.')
+    trailing_group.add_argument('--ema-disable-trailing', dest='ema_use_trailing', action='store_false', help='Desativa o trailing stop dinâmico para OMDs.')
+    trailing_group.set_defaults(ema_use_trailing=ctx.ema_macd_use_trailing)
+    parser.add_argument('--ema-trailing-rr', dest='ema_trailing_rr', type=float, default=ctx.ema_macd_trailing_rr, help='RR utilizado para calcular a distância do trailing stop (ex.: 1.0 move o SL para 1R abaixo do topo).')
+    parser.add_argument('--ema-trailing-activate', dest='ema_trailing_activate', type=float, default=ctx.ema_macd_trailing_activate_rr, help='RR mínimo alcançado para começar a aplicar o trailing stop (ex.: 2.0 ativa após 2R).')
     parser.add_argument('--divergence-min-drop', dest='divergence_min_drop', type=float, default=ctx.divergence_min_drop_pct * 100, help='Variação percentual mínima entre fundos/topos consecutivos para considerar divergência RSI (ex.: 1.5 = 1.5%%).')
+    momentum_divergence_group = parser.add_mutually_exclusive_group()
+    momentum_divergence_group.add_argument('--momentum-require-divergence', dest='momentum_require_divergence', action='store_true', default=ctx.momentum_require_divergence, help='Exige divergência RSI para confirmar sinais da estratégia Momentum.')
+    momentum_divergence_group.add_argument('--momentum-allow-no-divergence', dest='momentum_require_divergence', action='store_false', help='Permite sinais Momentum mesmo sem divergência RSI.')
+    momentum_bonus_group = parser.add_mutually_exclusive_group()
+    momentum_bonus_group.add_argument('--momentum-disable-divergence-bonus', dest='momentum_use_divergence_bonus', action='store_false', help='Não soma pontos extras quando há divergência RSI nos sinais Momentum.')
+    momentum_bonus_group.add_argument('--momentum-enable-divergence-bonus', dest='momentum_use_divergence_bonus', action='store_true', help='Soma pontos extras quando há divergência RSI nos sinais Momentum.')
+    momentum_bonus_group.set_defaults(momentum_use_divergence_bonus=ctx.momentum_use_divergence_bonus)
+    parser.add_argument('--momentum-rsi-long-max', dest='momentum_rsi_long_max', type=float, default=ctx.momentum_rsi_long_max, help='RSI máximo permitido para entradas long na estratégia Momentum.')
+    parser.add_argument('--momentum-rsi-short-min', dest='momentum_rsi_short_min', type=float, default=ctx.momentum_rsi_short_min, help='RSI mínimo permitido para entradas short na estratégia Momentum.')
+    momentum_trailing_group = parser.add_mutually_exclusive_group()
+    momentum_trailing_group.add_argument('--momentum-enable-trailing', dest='momentum_use_trailing', action='store_true', help='Ativa trailing stop dinâmico para Momentum.')
+    momentum_trailing_group.add_argument('--momentum-disable-trailing', dest='momentum_use_trailing', action='store_false', help='Desativa o trailing stop dinâmico para Momentum.')
+    momentum_trailing_group.set_defaults(momentum_use_trailing=ctx.momentum_use_trailing)
+    parser.add_argument('--momentum-trailing-rr', dest='momentum_trailing_rr', type=float, default=ctx.momentum_trailing_rr, help='RR utilizado para calcular a distância do trailing Momentum (ex.: 1.0 mantém 1R).')
+    parser.add_argument('--momentum-trailing-activate', dest='momentum_trailing_activate', type=float, default=ctx.momentum_trailing_activate_rr, help='RR mínimo alcançado para ativar o trailing Momentum (ex.: 2.0 ativa após 2R).')
     parser.add_argument('--check-symbol', dest='check_symbol', help='Valida se o par existe na corretora e termina imediatamente')
     parser.add_argument('--all-pairs', dest='all_pairs', action='store_true', help='Loop live cobre todos os pares configurados (ignora --symbol)')
     parser.set_defaults(paper=None)
@@ -107,6 +128,10 @@ if __name__ == "__main__":
         "ema_cross_lookback": args.cross_lookback,
         "ema_require_divergence": args.require_divergence,
         "ema_require_rsi_zone": args.require_rsi_zone,
+        "ema_macd_use_trailing": args.ema_use_trailing,
+        "momentum_require_divergence": args.momentum_require_divergence,
+        "momentum_use_divergence_bonus": args.momentum_use_divergence_bonus,
+        "momentum_use_trailing": args.momentum_use_trailing,
     }
     if args.risk_percent is not None:
         cli_overrides["risk_percent"] = max(0.0001, args.risk_percent / 100.0)
@@ -122,6 +147,18 @@ if __name__ == "__main__":
         cli_overrides["ema_rsi_zone_long_max"] = args.rsi_zone_long_max
     if args.rsi_zone_short_min is not None:
         cli_overrides["ema_rsi_zone_short_min"] = args.rsi_zone_short_min
+    if args.momentum_rsi_long_max is not None:
+        cli_overrides["momentum_rsi_long_max"] = args.momentum_rsi_long_max
+    if args.momentum_rsi_short_min is not None:
+        cli_overrides["momentum_rsi_short_min"] = args.momentum_rsi_short_min
+    if args.ema_trailing_rr is not None:
+        cli_overrides["ema_macd_trailing_rr"] = max(0.1, args.ema_trailing_rr)
+    if args.ema_trailing_activate is not None:
+        cli_overrides["ema_macd_trailing_activate_rr"] = max(0.0, args.ema_trailing_activate)
+    if args.momentum_trailing_rr is not None:
+        cli_overrides["momentum_trailing_rr"] = max(0.1, args.momentum_trailing_rr)
+    if args.momentum_trailing_activate is not None:
+        cli_overrides["momentum_trailing_activate_rr"] = max(0.0, args.momentum_trailing_activate)
 
     ctx.override_from_cli(cli_overrides)
 
@@ -136,10 +173,37 @@ if __name__ == "__main__":
             ctx.ema_rsi_zone_long_max,
             ctx.ema_rsi_zone_short_min,
         )
+        logging.info(
+            "Trailing dinâmico: %s · RR trailing=%.2f · ativa após %.2fR",
+            "ativo" if ctx.ema_macd_use_trailing else "inativo",
+            ctx.ema_macd_trailing_rr,
+            ctx.ema_macd_trailing_activate_rr,
+        )
+    else:
+        logging.info(
+            "Momentum exige divergência RSI: %s · bônus ativo: %s",
+            "sim" if ctx.momentum_require_divergence else "não",
+            "sim" if ctx.momentum_use_divergence_bonus else "não",
+        )
+        logging.info(
+            "Momentum limites RSI — long ≤ %.2f | short ≥ %.2f",
+            ctx.momentum_rsi_long_max,
+            ctx.momentum_rsi_short_min,
+        )
+        logging.info(
+            "Trailing Momentum: %s · RR=%.2f · ativa após %.2fR",
+            "ativo" if ctx.momentum_use_trailing else "inativo",
+            ctx.momentum_trailing_rr,
+            ctx.momentum_trailing_activate_rr,
+        )
     logging.info("Modo de risco: %s", ctx.risk_mode)
     logging.info("Risco por trade: %.2f%%", ctx.risk_percent * 100)
     logging.info("Capital base para sizing: %.2f", ctx.capital_base)
     logging.info("Alavancagem alvo: %.2fx", ctx.leverage)
+    logging.info(
+        "Bias fixo 4h: %s",
+        "ativo" if ctx.use_fixed_bias_timeframe else "desligado",
+    )
     logging.info("Divergência RSI: queda mínima %.2f%% entre pivôs", ctx.divergence_min_drop_pct * 100)
 
     update_user_config(
@@ -151,6 +215,18 @@ if __name__ == "__main__":
         ema_require_rsi_zone=ctx.ema_require_rsi_zone,
         ema_rsi_zone_long_max=ctx.ema_rsi_zone_long_max,
         ema_rsi_zone_short_min=ctx.ema_rsi_zone_short_min,
+        use_fixed_bias_timeframe=ctx.use_fixed_bias_timeframe,
+        fixed_bias_timeframe=ctx.fixed_bias_timeframe,
+        momentum_require_divergence=ctx.momentum_require_divergence,
+        momentum_use_divergence_bonus=ctx.momentum_use_divergence_bonus,
+        momentum_rsi_long_max=ctx.momentum_rsi_long_max,
+        momentum_rsi_short_min=ctx.momentum_rsi_short_min,
+        ema_macd_use_trailing=ctx.ema_macd_use_trailing,
+        ema_macd_trailing_rr=ctx.ema_macd_trailing_rr,
+        ema_macd_trailing_activate_rr=ctx.ema_macd_trailing_activate_rr,
+        momentum_use_trailing=ctx.momentum_use_trailing,
+        momentum_trailing_rr=ctx.momentum_trailing_rr,
+        momentum_trailing_activate_rr=ctx.momentum_trailing_activate_rr,
         symbol=args.symbol,
         timeframe=args.timeframe,
         risk_mode=ctx.risk_mode,
@@ -243,6 +319,18 @@ if __name__ == "__main__":
                     "ema_require_rsi_zone": ctx.ema_require_rsi_zone,
                     "ema_rsi_zone_long_max": ctx.ema_rsi_zone_long_max,
                     "ema_rsi_zone_short_min": ctx.ema_rsi_zone_short_min,
+                    "momentum_require_divergence": ctx.momentum_require_divergence,
+                    "momentum_use_divergence_bonus": ctx.momentum_use_divergence_bonus,
+                    "momentum_rsi_long_max": ctx.momentum_rsi_long_max,
+                    "momentum_rsi_short_min": ctx.momentum_rsi_short_min,
+                    "use_fixed_bias_timeframe": ctx.use_fixed_bias_timeframe,
+                    "fixed_bias_timeframe": ctx.fixed_bias_timeframe,
+                    "ema_macd_use_trailing": ctx.ema_macd_use_trailing,
+                    "ema_macd_trailing_rr": ctx.ema_macd_trailing_rr,
+                    "ema_macd_trailing_activate_rr": ctx.ema_macd_trailing_activate_rr,
+                    "momentum_use_trailing": ctx.momentum_use_trailing,
+                    "momentum_trailing_rr": ctx.momentum_trailing_rr,
+                    "momentum_trailing_activate_rr": ctx.momentum_trailing_activate_rr,
                     "trade_bias": ctx.trade_bias,
                     "strategy_mode": ctx.strategy_mode,
                     "environment": ctx.environment_mode,

@@ -36,7 +36,7 @@ def momentum_confirm_long(df):
 
     rsi_val = float(df["rsi"].iloc[-1]) if not np.isnan(df["rsi"].iloc[-1]) else None
     rsi_ok = True
-    if rsi_val is not None and rsi_val > 80:
+    if rsi_val is not None and rsi_val > ctx.momentum_rsi_long_max:
         rsi_ok = False
 
     score = 0.0
@@ -57,6 +57,7 @@ def momentum_confirm_long(df):
         "last_close": df["close"].iloc[-1],
         "rsi": rsi_val,
         "rsi_ok": rsi_ok,
+        "rsi_max_allowed": ctx.momentum_rsi_long_max,
     }
     if confirmed:
         details["trigger"] = "momentum"
@@ -79,7 +80,7 @@ def momentum_confirm_short(df):
 
     rsi_val = float(df["rsi"].iloc[-1]) if not np.isnan(df["rsi"].iloc[-1]) else None
     rsi_ok = True
-    if rsi_val is not None and rsi_val < 20:
+    if rsi_val is not None and rsi_val < ctx.momentum_rsi_short_min:
         rsi_ok = False
 
     score = 0.0
@@ -100,6 +101,7 @@ def momentum_confirm_short(df):
         "last_close": df["close"].iloc[-1],
         "rsi": rsi_val,
         "rsi_ok": rsi_ok,
+        "rsi_min_allowed": ctx.momentum_rsi_short_min,
     }
     if confirmed:
         details["trigger"] = "momentum"
@@ -139,8 +141,20 @@ def analyze_momentum_and_maybe_trade(symbol: str):
         if ctx.trade_bias in ("long", "both"):
             has_div_long = has_bullish_rsi_divergence(df)
             confirmed_long, details_long = momentum_confirm_long(df)
-            if confirmed_long and has_div_long:
+            if details_long is None:
+                details_long = {}
+            details_long["has_divergence"] = has_div_long
+            details_long["require_divergence"] = ctx.momentum_require_divergence
+            divergence_ok = has_div_long or not ctx.momentum_require_divergence
+            details_long["divergence_ok"] = divergence_ok
+            bonus_applied = False
+            if confirmed_long and ctx.momentum_use_divergence_bonus and has_div_long:
                 details_long["score"] = details_long.get("score", 0) + 1.0
+                bonus_applied = True
+            details_long["divergence_bonus_applied"] = bonus_applied
+            if confirmed_long and not divergence_ok:
+                confirmed_long = False
+                details_long["divergence_blocked"] = True
             long_info = {
                 "confirmed": confirmed_long,
                 "details": details_long,
@@ -159,8 +173,20 @@ def analyze_momentum_and_maybe_trade(symbol: str):
         if ctx.trade_bias in ("short", "both"):
             has_div_short = has_bearish_rsi_divergence(df)
             confirmed_short, details_short = momentum_confirm_short(df)
-            if confirmed_short and has_div_short:
+            if details_short is None:
+                details_short = {}
+            details_short["has_divergence"] = has_div_short
+            details_short["require_divergence"] = ctx.momentum_require_divergence
+            divergence_ok_short = has_div_short or not ctx.momentum_require_divergence
+            details_short["divergence_ok"] = divergence_ok_short
+            bonus_applied_short = False
+            if confirmed_short and ctx.momentum_use_divergence_bonus and has_div_short:
                 details_short["score"] = details_short.get("score", 0) + 1.0
+                bonus_applied_short = True
+            details_short["divergence_bonus_applied"] = bonus_applied_short
+            if confirmed_short and not divergence_ok_short:
+                confirmed_short = False
+                details_short["divergence_blocked"] = True
             short_info = {
                 "confirmed": confirmed_short,
                 "details": details_short,
@@ -318,6 +344,10 @@ def analyze_momentum_and_maybe_trade(symbol: str):
         risk_multiplier=None,
         bar_time=selected.get("bar_time"),
         timeframe=selected.get("tf"),
+        trailing_enabled=ctx.momentum_use_trailing,
+        trailing_rr=ctx.momentum_trailing_rr,
+        trailing_activate_rr=ctx.momentum_trailing_activate_rr,
+        trailing_strategy="momentum",
     )
     summary["should_enter"] = pos is not None
     return pos, summary

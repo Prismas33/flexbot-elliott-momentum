@@ -232,6 +232,22 @@ def analyze_ema_macd_and_maybe_trade(symbol: str) -> Tuple[Optional[Dict[str, An
             base_pct * risk_mult,
         )
 
+    trailing_kwargs = {}
+    if risk_key.startswith("ema"):
+        trailing_kwargs = {
+            "trailing_enabled": ctx.ema_macd_use_trailing,
+            "trailing_rr": ctx.ema_macd_trailing_rr,
+            "trailing_activate_rr": ctx.ema_macd_trailing_activate_rr,
+            "trailing_strategy": "ema_macd",
+        }
+    elif risk_key.startswith("momentum"):
+        trailing_kwargs = {
+            "trailing_enabled": ctx.momentum_use_trailing,
+            "trailing_rr": ctx.momentum_trailing_rr,
+            "trailing_activate_rr": ctx.momentum_trailing_activate_rr,
+            "trailing_strategy": "momentum",
+        }
+
     pos = enter_position(
         symbol,
         selected["entry_price"],
@@ -243,6 +259,7 @@ def analyze_ema_macd_and_maybe_trade(symbol: str) -> Tuple[Optional[Dict[str, An
         risk_multiplier=None,
         bar_time=selected.get("bar_time"),
         timeframe=selected.get("tf"),
+        **trailing_kwargs,
     )
     summary["should_enter"] = pos is not None
     return pos, summary

@@ -21,9 +21,23 @@ from elliott_momentum_breakout_bot import (
     validate_symbol,
 )
 from flexbot import context as ctx
-from state_store import read_user_config, update_user_config, read_control_state, write_control_state
+from state_store import (
+    read_user_config,
+    update_user_config,
+    read_control_state,
+    write_control_state,
+    save_timeframe_preset,
+    get_timeframe_preset,
+)
 
 st.set_page_config(page_title="FlexBot Dashboard", layout="wide")
+
+
+def _rerun_app() -> None:
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()  # type: ignore[attr-defined]
 
 CUSTOM_CSS = """
 <style>
@@ -189,6 +203,9 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.title("📈 FlexBot Dashboard")
 st.caption("Visualize resultados de backtests e acompanhe métricas do loop live.")
 
+if "preset_feedback" in st.session_state:
+    st.success(st.session_state.pop("preset_feedback"))
+
 STATE_DIR = Path('.flexbot_state')
 RUNTIME_FILE = STATE_DIR / 'runtime.json'
 BACKTEST_FILE = STATE_DIR / 'latest_backtest.json'
@@ -344,6 +361,15 @@ with st.sidebar:
         index=bias_options.index(default_bias),
     )
 
+    stored_fixed_bias_flag = config_data.get("use_fixed_bias_timeframe")
+    if not isinstance(stored_fixed_bias_flag, bool):
+        stored_fixed_bias_flag = ctx.use_fixed_bias_timeframe
+    use_fixed_bias_value = st.checkbox(
+        "Forçar bias pelo 4h",
+        value=stored_fixed_bias_flag,
+        help="Quando ativo, todas as entradas consultam a tendência do timeframe 4h como filtro direcional.",
+    )
+
     risk_mode_labels = {
         "standard": "Alocado",
         "hunter": "Hunter (100%)",
@@ -428,10 +454,70 @@ with st.sidebar:
         configured_rsi_short_min = float(configured_rsi_short_min)
     except (TypeError, ValueError):
         configured_rsi_short_min = ctx.ema_rsi_zone_short_min
+    configured_trailing_flag = config_data.get("ema_macd_use_trailing")
+    if not isinstance(configured_trailing_flag, bool):
+        configured_trailing_flag = ctx.ema_macd_use_trailing
+    configured_trailing_rr = config_data.get("ema_macd_trailing_rr", ctx.ema_macd_trailing_rr)
+    try:
+        configured_trailing_rr = float(configured_trailing_rr)
+    except (TypeError, ValueError):
+        configured_trailing_rr = ctx.ema_macd_trailing_rr
+    if configured_trailing_rr <= 0:
+        configured_trailing_rr = ctx.ema_macd_trailing_rr
+    configured_trailing_activate = config_data.get("ema_macd_trailing_activate_rr", ctx.ema_macd_trailing_activate_rr)
+    try:
+        configured_trailing_activate = float(configured_trailing_activate)
+    except (TypeError, ValueError):
+        configured_trailing_activate = ctx.ema_macd_trailing_activate_rr
+    if configured_trailing_activate < 0:
+        configured_trailing_activate = ctx.ema_macd_trailing_activate_rr
+    momentum_require_default = config_data.get("momentum_require_divergence")
+    if not isinstance(momentum_require_default, bool):
+        momentum_require_default = ctx.momentum_require_divergence
+    momentum_bonus_default = config_data.get("momentum_use_divergence_bonus")
+    if not isinstance(momentum_bonus_default, bool):
+        momentum_bonus_default = ctx.momentum_use_divergence_bonus
+    configured_momentum_rsi_long = config_data.get("momentum_rsi_long_max", ctx.momentum_rsi_long_max)
+    try:
+        configured_momentum_rsi_long = float(configured_momentum_rsi_long)
+    except (TypeError, ValueError):
+        configured_momentum_rsi_long = ctx.momentum_rsi_long_max
+    configured_momentum_rsi_short = config_data.get("momentum_rsi_short_min", ctx.momentum_rsi_short_min)
+    try:
+        configured_momentum_rsi_short = float(configured_momentum_rsi_short)
+    except (TypeError, ValueError):
+        configured_momentum_rsi_short = ctx.momentum_rsi_short_min
+    configured_momentum_trailing_flag = config_data.get("momentum_use_trailing")
+    if not isinstance(configured_momentum_trailing_flag, bool):
+        configured_momentum_trailing_flag = ctx.momentum_use_trailing
+    configured_momentum_trailing_rr = config_data.get("momentum_trailing_rr", ctx.momentum_trailing_rr)
+    try:
+        configured_momentum_trailing_rr = float(configured_momentum_trailing_rr)
+    except (TypeError, ValueError):
+        configured_momentum_trailing_rr = ctx.momentum_trailing_rr
+    if configured_momentum_trailing_rr <= 0:
+        configured_momentum_trailing_rr = ctx.momentum_trailing_rr
+    configured_momentum_trailing_activate = config_data.get("momentum_trailing_activate_rr", ctx.momentum_trailing_activate_rr)
+    try:
+        configured_momentum_trailing_activate = float(configured_momentum_trailing_activate)
+    except (TypeError, ValueError):
+        configured_momentum_trailing_activate = ctx.momentum_trailing_activate_rr
+    if configured_momentum_trailing_activate < 0:
+        configured_momentum_trailing_activate = ctx.momentum_trailing_activate_rr
     if configured_drop_pct < 0:
         configured_drop_pct = 0.0
     drop_options = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
     closest_drop = min(drop_options, key=lambda opt: abs(opt - configured_drop_pct * 100))
+    momentum_require_divergence_value = momentum_require_default
+    momentum_use_divergence_bonus_value = momentum_bonus_default
+    momentum_rsi_long_max_value = configured_momentum_rsi_long
+    momentum_rsi_short_min_value = configured_momentum_rsi_short
+    use_trailing_value = configured_trailing_flag
+    trailing_rr_value = configured_trailing_rr
+    trailing_activate_value = configured_trailing_activate
+    momentum_use_trailing_value = configured_momentum_trailing_flag
+    momentum_trailing_rr_value = configured_momentum_trailing_rr
+    momentum_trailing_activate_value = configured_momentum_trailing_activate
     if strategy == "ema_macd":
         cross_lookback = st.slider("Velas para cruzamento OMDs", min_value=2, max_value=30, value=default_cross, step=1)
         require_divergence = st.checkbox(
@@ -445,9 +531,22 @@ with st.sidebar:
             help="Quando marcada, a confirmação OMDs só aceita sinais com RSI em zona definida (long ≤ limite, short ≥ limite).",
         )
         if require_rsi_zone:
-            rsi_long_max = 29.0
-            rsi_short_min = 70.0
-            st.caption("RSI em zona ativo: longs precisam de RSI ≤ 29 e shorts de RSI ≥ 70.")
+            rsi_long_max = st.slider(
+                "RSI máximo (long ≤ valor)",
+                min_value=10.0,
+                max_value=60.0,
+                value=float(round(configured_rsi_long_max, 1)),
+                step=1.0,
+                help="Quando ativo, o RSI precisa estar abaixo ou igual a este valor para validar entries long.",
+            )
+            rsi_short_min = st.slider(
+                "RSI mínimo (short ≥ valor)",
+                min_value=40.0,
+                max_value=90.0,
+                value=float(round(configured_rsi_short_min, 1)),
+                step=1.0,
+                help="Quando ativo, o RSI precisa estar acima ou igual a este valor para validar entries short.",
+            )
         else:
             rsi_long_max = configured_rsi_long_max
             rsi_short_min = configured_rsi_short_min
@@ -460,7 +559,86 @@ with st.sidebar:
             )
         else:
             divergence_min_drop_choice = closest_drop
-            st.caption("Divergência desativada: filtro de queda mínima oculto.")
+        use_trailing_value = st.checkbox(
+            "Ativar trailing stop dinâmico",
+            value=configured_trailing_flag,
+            help="Quando ativo, move o stop conforme o trade avança após atingir o RR mínimo configurado.",
+        )
+        trailing_activate_value = st.slider(
+            "Ativar trailing após RR",
+            min_value=0.0,
+            max_value=6.0,
+            value=float(round(configured_trailing_activate, 1)),
+            step=0.1,
+            help="RR mínimo alcançado para começar a ajustar o stop. Por exemplo, 2.0 inicia o trailing após 2R.",
+            disabled=not use_trailing_value,
+        )
+        trailing_rr_value = st.slider(
+            "Distância do trailing (RR)",
+            min_value=0.2,
+            max_value=3.0,
+            value=float(round(configured_trailing_rr, 1)),
+            step=0.1,
+            help="Quanto do RR manter entre o preço e o stop dinâmico. 1.0 mantém o stop a 1R do topo atual.",
+            disabled=not use_trailing_value,
+        )
+    elif strategy == "momentum":
+        cross_lookback = default_cross
+        require_divergence = require_default
+        require_rsi_zone = rsi_zone_default
+        rsi_long_max = configured_rsi_long_max
+        rsi_short_min = configured_rsi_short_min
+        divergence_min_drop_choice = closest_drop
+        st.subheader("Ajustes Momentum")
+        momentum_require_divergence_value = st.checkbox(
+            "Exigir divergência RSI (Momentum)",
+            value=momentum_require_default,
+            help="Quando marcado, sinais Momentum só validam quando há divergência RSI na direção esperada.",
+        )
+        momentum_use_divergence_bonus_value = st.checkbox(
+            "Somar bônus por divergência (Momentum)",
+            value=momentum_bonus_default,
+            help="Quando ativo, adiciona pontuação extra aos sinais Momentum com divergência RSI.",
+        )
+        momentum_rsi_long_max_value = st.slider(
+            "RSI máximo (Momentum long ≤ valor)",
+            min_value=40.0,
+            max_value=80.0,
+            value=float(round(configured_momentum_rsi_long, 1)),
+            step=1.0,
+            help="Limite de RSI permitido para entradas long Momentum.",
+        )
+        momentum_rsi_short_min_value = st.slider(
+            "RSI mínimo (Momentum short ≥ valor)",
+            min_value=20.0,
+            max_value=70.0,
+            value=float(round(configured_momentum_rsi_short, 1)),
+            step=1.0,
+            help="Limite inferior de RSI para aceitar entradas short Momentum.",
+        )
+        momentum_use_trailing_value = st.checkbox(
+            "Ativar trailing stop (Momentum)",
+            value=configured_momentum_trailing_flag,
+            help="Quando ativo, Momentum move o stop após atingir o RR mínimo configurado.",
+        )
+        momentum_trailing_activate_value = st.slider(
+            "Ativar trailing Momentum após RR",
+            min_value=0.0,
+            max_value=6.0,
+            value=float(round(configured_momentum_trailing_activate, 1)),
+            step=0.1,
+            help="RR mínimo alcançado para iniciar o trailing nos trades Momentum.",
+            disabled=not momentum_use_trailing_value,
+        )
+        momentum_trailing_rr_value = st.slider(
+            "Distância trailing Momentum (RR)",
+            min_value=0.2,
+            max_value=3.0,
+            value=float(round(configured_momentum_trailing_rr, 1)),
+            step=0.1,
+            help="Quanto de RR manter entre o preço e o stop ao ajustar Momentum.",
+            disabled=not momentum_use_trailing_value,
+        )
     else:
         cross_lookback = default_cross
         require_divergence = require_default
@@ -471,6 +649,47 @@ with st.sidebar:
         st.caption("Parâmetros de cruzamento/divergência aplicam-se apenas à estratégia OMDs.")
     divergence_min_drop_pct = max(0.0, float(divergence_min_drop_choice) / 100.0)
     ctx.divergence_min_drop_pct = divergence_min_drop_pct
+
+    preset_payload = {
+        "strategy_mode": strategy,
+        "trade_bias": trade_bias,
+        "ema_cross_lookback": cross_lookback,
+        "ema_require_divergence": require_divergence,
+        "ema_require_rsi_zone": require_rsi_zone,
+        "divergence_min_drop_pct": divergence_min_drop_pct,
+        "ema_rsi_zone_long_max": rsi_long_max,
+        "ema_rsi_zone_short_min": rsi_short_min,
+        "use_fixed_bias_timeframe": use_fixed_bias_value,
+        "fixed_bias_timeframe": ctx.fixed_bias_timeframe,
+        "ema_macd_use_trailing": use_trailing_value,
+        "ema_macd_trailing_rr": trailing_rr_value,
+        "ema_macd_trailing_activate_rr": trailing_activate_value,
+        "risk_mode": risk_mode_choice,
+        "risk_percent": risk_percent_value,
+        "capital_base": capital_base_value,
+        "leverage": leverage_value,
+        "multi_asset_enabled": multi_asset_enabled,
+        "active_pairs": active_pairs,
+        "momentum_require_divergence": momentum_require_divergence_value,
+        "momentum_use_divergence_bonus": momentum_use_divergence_bonus_value,
+        "momentum_rsi_long_max": momentum_rsi_long_max_value,
+        "momentum_rsi_short_min": momentum_rsi_short_min_value,
+        "momentum_use_trailing": momentum_use_trailing_value,
+        "momentum_trailing_rr": momentum_trailing_rr_value,
+        "momentum_trailing_activate_rr": momentum_trailing_activate_value,
+    }
+    preset_cols = st.columns(2)
+    if preset_cols[0].button("💾 G", use_container_width=True):
+        save_timeframe_preset(timeframe, preset_payload)
+        st.session_state["preset_feedback"] = f"Preset para {timeframe} atualizado."
+        _rerun_app()
+    current_preset = get_timeframe_preset(timeframe, strategy=strategy)
+    restore_disabled = current_preset is None
+    if preset_cols[1].button("🔄 R", use_container_width=True, disabled=restore_disabled):
+        if current_preset:
+            update_user_config(**current_preset, timeframe=timeframe)
+            st.session_state["preset_feedback"] = f"Preset para {timeframe} restaurado."
+            _rerun_app()
     if (
         config_data.get("symbol") != symbol
         or config_data.get("timeframe") != timeframe
@@ -478,9 +697,21 @@ with st.sidebar:
         or config_data.get("ema_cross_lookback") != cross_lookback
         or config_data.get("ema_require_divergence") != require_divergence
         or config_data.get("ema_require_rsi_zone") != require_rsi_zone
+        or config_data.get("use_fixed_bias_timeframe") != use_fixed_bias_value
+        or config_data.get("fixed_bias_timeframe") != ctx.fixed_bias_timeframe
+        or bool(configured_trailing_flag) != bool(use_trailing_value)
+        or abs(configured_trailing_rr - trailing_rr_value) > 1e-9
+        or abs(configured_trailing_activate - trailing_activate_value) > 1e-9
         or abs(configured_drop_pct - divergence_min_drop_pct) > 1e-9
         or float(configured_rsi_long_max) != float(rsi_long_max)
         or float(configured_rsi_short_min) != float(rsi_short_min)
+        or config_data.get("momentum_require_divergence") != momentum_require_divergence_value
+        or config_data.get("momentum_use_divergence_bonus") != momentum_use_divergence_bonus_value
+        or float(configured_momentum_rsi_long) != float(momentum_rsi_long_max_value)
+        or float(configured_momentum_rsi_short) != float(momentum_rsi_short_min_value)
+        or bool(configured_momentum_trailing_flag) != bool(momentum_use_trailing_value)
+        or abs(configured_momentum_trailing_rr - momentum_trailing_rr_value) > 1e-9
+        or abs(configured_momentum_trailing_activate - momentum_trailing_activate_value) > 1e-9
         or config_data.get("risk_mode") != risk_mode_choice
         or abs(configured_risk_percent - risk_percent_value) > 1e-9
         or abs(configured_capital_base - capital_base_value) > 1e-9
@@ -499,6 +730,18 @@ with st.sidebar:
             divergence_min_drop_pct=divergence_min_drop_pct,
             ema_rsi_zone_long_max=rsi_long_max,
             ema_rsi_zone_short_min=rsi_short_min,
+            use_fixed_bias_timeframe=use_fixed_bias_value,
+            fixed_bias_timeframe=ctx.fixed_bias_timeframe,
+            ema_macd_use_trailing=use_trailing_value,
+            ema_macd_trailing_rr=trailing_rr_value,
+            ema_macd_trailing_activate_rr=trailing_activate_value,
+            momentum_require_divergence=momentum_require_divergence_value,
+            momentum_use_divergence_bonus=momentum_use_divergence_bonus_value,
+            momentum_rsi_long_max=momentum_rsi_long_max_value,
+            momentum_rsi_short_min=momentum_rsi_short_min_value,
+            momentum_use_trailing=momentum_use_trailing_value,
+            momentum_trailing_rr=momentum_trailing_rr_value,
+            momentum_trailing_activate_rr=momentum_trailing_activate_value,
             strategy_mode=strategy,
             risk_mode=risk_mode_choice,
             risk_percent=risk_percent_value,
@@ -515,6 +758,17 @@ with st.sidebar:
     ctx.ema_require_rsi_zone = require_rsi_zone
     ctx.ema_rsi_zone_long_max = rsi_long_max
     ctx.ema_rsi_zone_short_min = rsi_short_min
+    ctx.use_fixed_bias_timeframe = use_fixed_bias_value
+    ctx.ema_macd_use_trailing = use_trailing_value
+    ctx.ema_macd_trailing_rr = trailing_rr_value
+    ctx.ema_macd_trailing_activate_rr = trailing_activate_value
+    ctx.momentum_require_divergence = momentum_require_divergence_value
+    ctx.momentum_use_divergence_bonus = momentum_use_divergence_bonus_value
+    ctx.momentum_rsi_long_max = momentum_rsi_long_max_value
+    ctx.momentum_rsi_short_min = momentum_rsi_short_min_value
+    ctx.momentum_use_trailing = momentum_use_trailing_value
+    ctx.momentum_trailing_rr = momentum_trailing_rr_value
+    ctx.momentum_trailing_activate_rr = momentum_trailing_activate_value
     symbols_for_backtest = (
         tuple(dict.fromkeys(active_pairs))
         if multi_asset_enabled and len(active_pairs) > 1
@@ -538,7 +792,7 @@ with st.sidebar:
 
     run_button = st.button("▶️ Executar backtest", use_container_width=True)
     st.markdown("---")
-    st.caption("Para métricas em tempo real, mantenha `main_loop()` rodando (ex.: `start.ps1 -Action live`).")
+    st.caption(".")
 
 divergence_badge = "On" if require_divergence else "Off"
 risk_badge_label = (
@@ -741,6 +995,13 @@ def run_backtest(
     require_rsi_zone: bool,
     rsi_zone_long_max: float,
     rsi_zone_short_min: float,
+    momentum_require_divergence: bool,
+    momentum_use_divergence_bonus: bool,
+    momentum_rsi_long_max: float,
+    momentum_rsi_short_min: float,
+    momentum_use_trailing: bool,
+    momentum_trailing_rr: float,
+    momentum_trailing_activate_rr: float,
 ):
     multi = len(symbols) > 1
     if abs(ctx.divergence_min_drop_pct - divergence_min_drop_pct) > 1e-12:
@@ -748,6 +1009,13 @@ def run_backtest(
     ctx.ema_require_rsi_zone = require_rsi_zone
     ctx.ema_rsi_zone_long_max = rsi_zone_long_max
     ctx.ema_rsi_zone_short_min = rsi_zone_short_min
+    ctx.momentum_require_divergence = momentum_require_divergence
+    ctx.momentum_use_divergence_bonus = momentum_use_divergence_bonus
+    ctx.momentum_rsi_long_max = momentum_rsi_long_max
+    ctx.momentum_rsi_short_min = momentum_rsi_short_min
+    ctx.momentum_use_trailing = momentum_use_trailing
+    ctx.momentum_trailing_rr = momentum_trailing_rr
+    ctx.momentum_trailing_activate_rr = momentum_trailing_activate_rr
     if multi:
         df_trades, coverage = backtest_many(
             symbols,
@@ -803,6 +1071,13 @@ with backtest_tab:
                     require_rsi_zone,
                     rsi_long_max,
                     rsi_short_min,
+                    momentum_require_divergence_value,
+                    momentum_use_divergence_bonus_value,
+                    momentum_rsi_long_max_value,
+                    momentum_rsi_short_min_value,
+                    momentum_use_trailing_value,
+                    momentum_trailing_rr_value,
+                    momentum_trailing_activate_value,
                 )
         if df is None or df.empty:
             st.warning("Nenhuma operação encontrada para os parâmetros escolhidos.")

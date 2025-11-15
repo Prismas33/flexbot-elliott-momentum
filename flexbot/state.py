@@ -38,6 +38,8 @@ def serialize_open_positions() -> List[Dict[str, object]]:
             "strategy": pos.get("strategy", "unknown"),
             "partial_taken": pos.get("partial_taken", False),
             "breakeven_moved": pos.get("breakeven_moved", False),
+            "trailing_active": pos.get("trailing_active", False),
+            "tp_disabled": pos.get("tp_disabled", False),
             "risk_multiplier": pos.get("risk_multiplier", 1.0),
             "timeframe": pos.get("timeframe"),
             "min_price_seen": pos.get("min_price_seen"),
@@ -49,6 +51,10 @@ def serialize_open_positions() -> List[Dict[str, object]]:
             "risk_amount": pos.get("risk_amount"),
             "leverage": pos.get("leverage"),
             "margin_required": pos.get("margin_required"),
+            "trailing_enabled": pos.get("trailing_enabled", False),
+            "trailing_rr": pos.get("trailing_rr"),
+            "trailing_activate_rr": pos.get("trailing_activate_rr"),
+            "trailing_strategy": pos.get("trailing_strategy"),
         })
     return serialized
 
@@ -114,6 +120,10 @@ def enter_position(
     risk_multiplier: Optional[float] = None,
     bar_time=None,
     timeframe=None,
+    trailing_enabled: Optional[bool] = None,
+    trailing_rr: Optional[float] = None,
+    trailing_activate_rr: Optional[float] = None,
+    trailing_strategy: Optional[str] = None,
 ):
     if has_open_position(symbol):
         logging.info("%s trade ignorado — já existe posição aberta em %s", strategy_label, symbol)
@@ -207,7 +217,20 @@ def enter_position(
         "risk_amount": risk_amount,
         "leverage": leverage,
         "margin_required": margin_required,
+        "initial_risk_per_unit": risk_per_unit,
+        "trailing_active": False,
+        "tp_disabled": False,
     }
+    if trailing_enabled is not None:
+        pos["trailing_enabled"] = bool(trailing_enabled)
+    if trailing_rr is not None:
+        pos["trailing_rr"] = float(trailing_rr)
+    if trailing_activate_rr is not None:
+        pos["trailing_activate_rr"] = float(trailing_activate_rr)
+    if trailing_strategy is not None:
+        pos["trailing_strategy"] = trailing_strategy
+    else:
+        pos["trailing_strategy"] = strategy_label
     open_positions.append(pos)
     place_conditional_orders(symbol, side, qty, stop_price, tp_price)
     if bar_time is not None and timeframe is not None:
@@ -224,6 +247,8 @@ def monitor_and_close_positions(position_store: List[Dict[str, object]]):
         high = float(df["high"].max())
         low = float(df["low"].min())
         last_close = float(df["close"].iloc[-1]) if len(df["close"]) else pos["entry_price"]
+        current_high = float(df["high"].iloc[-1]) if len(df["high"]) else high
+        current_low = float(df["low"].iloc[-1]) if len(df["low"]) else low
 
         entry = pos["entry_price"]
         stop = pos["stop"]
@@ -232,26 +257,105 @@ def monitor_and_close_positions(position_store: List[Dict[str, object]]):
         pos["max_price_seen"] = max(pos.get("max_price_seen", entry), high)
         pos["min_price_seen"] = min(pos.get("min_price_seen", entry), low)
 
-        if stop is not None and tp is not None and entry is not None:
-            risk_per_unit = entry - stop if pos["side"] == "buy" else stop - entry
-            if risk_per_unit > 0:
-                if pos["side"] == "buy":
-                    progress_price = pos["max_price_seen"]
-                    rr_reached = (progress_price - entry) / risk_per_unit
-                else:
-                    progress_price = pos["min_price_seen"]
-                    rr_reached = (entry - progress_price) / risk_per_unit
+        initial_risk_per_unit = abs(float(pos.get("initial_risk_per_unit") or 0.0))
+        if initial_risk_per_unit <= 0:
+            qty_total = float(pos.get("qty_total") or 0.0)
+            risk_amount = float(pos.get("risk_amount") or 0.0)
+            if qty_total > 0 and abs(risk_amount) > 0:
+                initial_risk_per_unit = abs(risk_amount / qty_total)
+                pos["initial_risk_per_unit"] = initial_risk_per_unit
+            elif entry is not None and stop is not None:
+                initial_risk_per_unit = abs(entry - stop)
+                pos["initial_risk_per_unit"] = initial_risk_per_unit
+
+        rr_reached = 0.0
+        progress_price = None
+        trailing_active = bool(pos.get("trailing_active"))
+
+        if stop is not None and entry is not None and initial_risk_per_unit > 0:
+            if pos["side"] == "buy":
+                progress_price = pos["max_price_seen"]
+                rr_reached = max(0.0, (progress_price - entry) / initial_risk_per_unit)
             else:
-                rr_reached = 0
-        else:
-            rr_reached = 0
+                progress_price = pos["min_price_seen"]
+                rr_reached = max(0.0, (entry - progress_price) / initial_risk_per_unit)
+
+        strategy_label = str(pos.get("strategy", "")) if pos.get("strategy") else ""
+        trailing_flag = pos.get("trailing_enabled")
+        if trailing_flag is None:
+            if strategy_label.startswith("ema"):
+                trailing_flag = context.ema_macd_use_trailing
+            elif strategy_label.startswith("momentum"):
+                trailing_flag = context.momentum_use_trailing
+            else:
+                trailing_flag = False
+        trailing_activate_cfg = pos.get("trailing_activate_rr")
+        trailing_rr_cfg = pos.get("trailing_rr")
+        if trailing_activate_cfg is None:
+            if strategy_label.startswith("ema"):
+                trailing_activate_cfg = context.ema_macd_trailing_activate_rr
+            elif strategy_label.startswith("momentum"):
+                trailing_activate_cfg = context.momentum_trailing_activate_rr
+        if trailing_rr_cfg is None:
+            if strategy_label.startswith("ema"):
+                trailing_rr_cfg = context.ema_macd_trailing_rr
+            elif strategy_label.startswith("momentum"):
+                trailing_rr_cfg = context.momentum_trailing_rr
+
+        trailing_applicable = (
+            bool(trailing_flag)
+            and initial_risk_per_unit > 0
+            and progress_price is not None
+            and trailing_activate_cfg is not None
+        )
+        if trailing_applicable and rr_reached >= float(trailing_activate_cfg):
+            trailing_rr = max(0.1, float(trailing_rr_cfg) if trailing_rr_cfg is not None else context.ema_macd_trailing_rr)
+            if not trailing_active:
+                trailing_active = True
+                pos["trailing_active"] = True
+                if not pos.get("tp_disabled"):
+                    pos["tp_disabled"] = True
+                logging.info(
+                    "Trailing ativado em %s (rr=%.2f) — TP fixo desativado",
+                    pos["symbol"],
+                    rr_reached,
+                )
+            if pos["side"] == "buy":
+                candidate_stop = progress_price - trailing_rr * initial_risk_per_unit
+                if pos.get("breakeven_moved") and entry is not None:
+                    candidate_stop = max(candidate_stop, entry)
+                if stop is None or candidate_stop > stop:
+                    pos["stop"] = candidate_stop
+                    stop = candidate_stop
+                    logging.debug(
+                        "Trailing SL (long) ajustado %s -> %.4f (rr=%.2f)",
+                        pos["symbol"],
+                        candidate_stop,
+                        rr_reached,
+                    )
+            else:
+                candidate_stop = progress_price + trailing_rr * initial_risk_per_unit
+                if pos.get("breakeven_moved") and entry is not None:
+                    candidate_stop = min(candidate_stop, entry)
+                if stop is None or candidate_stop < stop:
+                    pos["stop"] = candidate_stop
+                    stop = candidate_stop
+                    logging.debug(
+                        "Trailing SL (short) ajustado %s -> %.4f (rr=%.2f)",
+                        pos["symbol"],
+                        candidate_stop,
+                        rr_reached,
+                    )
+
+        rr_reached = max(rr_reached, 0.0)
 
         if (not pos.get("breakeven_moved", False)) and rr_reached >= context.break_even_rr and entry is not None:
             pos["stop"] = entry
             pos["breakeven_moved"] = True
             logging.info("Move SL para break-even em %s (%.2fR)", pos["symbol"], rr_reached)
+            stop = pos["stop"]
 
-        if (not pos.get("partial_taken", False)) and rr_reached >= context.take_partial_rr:
+        if context.take_partial_rr > 0 and (not pos.get("partial_taken", False)) and rr_reached >= context.take_partial_rr:
             qty_close = pos["qty_current"] * 0.5
             if qty_close > 0:
                 side = "sell" if pos["side"] == "buy" else "buy"
@@ -268,12 +372,13 @@ def monitor_and_close_positions(position_store: List[Dict[str, object]]):
                     except Exception as exc:
                         logging.error("Erro fechar parcial em %s: %s", pos["symbol"], exc)
 
+        tp_enabled = not pos.get("tp_disabled", False)
         if pos["side"] == "buy":
-            hit_tp = (tp is not None) and (pos["max_price_seen"] >= tp)
-            hit_sl = (stop is not None) and (pos["min_price_seen"] <= stop)
+            hit_tp = (tp is not None) and (current_high >= tp) and trailing_active is False and tp_enabled
+            hit_sl = (stop is not None) and (current_low <= stop)
         else:
-            hit_tp = (tp is not None) and (pos["min_price_seen"] <= tp)
-            hit_sl = (stop is not None) and (pos["max_price_seen"] >= stop)
+            hit_tp = (tp is not None) and (current_low <= tp) and trailing_active is False and tp_enabled
+            hit_sl = (stop is not None) and (current_high >= stop)
         if hit_tp or hit_sl:
             side = "sell" if pos["side"] == "buy" else "buy"
             qty = pos["qty_current"]

@@ -25,7 +25,7 @@ def compute_symbol_bias(symbol: str) -> Dict[str, str]:
     bias = {}
     parent_cache: Dict[str, pd.DataFrame | None] = {}
     for tf in context.timeframes:
-        parent = context.tf_bias_parent.get(tf)
+        parent = context.get_bias_parent(tf)
         if parent is None:
             bias[tf] = "both"
             continue
@@ -46,7 +46,7 @@ def bias_allows_short(tf: str, bias_map: Dict[str, str]) -> bool:
 
 
 def bias_from_slices(tf: str, ts, slice_store):
-    parent = context.tf_bias_parent.get(tf)
+    parent = context.get_bias_parent(tf)
     if parent is None:
         return "both"
     parent_df = slice_store.get(parent)

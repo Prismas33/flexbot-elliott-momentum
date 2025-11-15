@@ -25,12 +25,14 @@ pairs = [
     "ETH/USDC:USDC",
     "SOL/USDC:USDC",
     "XRP/USDC:USDC",
-    "ADA/USDC:USDC",
     "LINK/USDC:USDC",
-    "AVAX/USDC:USDC",
-    "MATIC/USDC:USDC",
-    "APT/USDC:USDC",
+    "POL/USDC:USDC",
     "DOGE/USDC:USDC",
+    "LTC/USDC:USDC",
+    "BNB/USDC:USDC",
+    "ARB/USDC:USDC",
+    "OP/USDC:USDC",
+    "SEI/USDC:USDC",
 ]
 active_pairs = pairs[:3]
 multi_asset_enabled = True
@@ -61,6 +63,10 @@ trade_bias = "long"
 momentum_stop_atr = 1.5
 momentum_tp_atr = 4.5
 momentum_min_tf_agree = 1
+momentum_require_divergence = False
+momentum_use_divergence_bonus = True
+momentum_rsi_long_max = 60.0
+momentum_rsi_short_min = 40.0
 min_rr_required = 2.0
 ema_fast_period = 5
 ema_slow_period = 21
@@ -69,13 +75,21 @@ ema_macd_slow = 55
 ema_macd_signal = 9
 ema_macd_min_tf_agree = 1
 ema_macd_stop_atr = 1.8
-ema_macd_tp_atr = 5.4
+ema_macd_tp_atr = 3.6
 ema_macd_cross_lookback = 8
 ema_macd_require_divergence = True
 divergence_min_drop_pct = 0.015
 ema_require_rsi_zone = False
 ema_rsi_zone_long_max = 29.0
 ema_rsi_zone_short_min = 70.0
+ema_macd_use_trailing = False
+ema_macd_trailing_rr = 1.0
+ema_macd_trailing_activate_rr = 2.0
+momentum_use_trailing = False
+momentum_trailing_rr = 1.0
+momentum_trailing_activate_rr = 2.0
+use_fixed_bias_timeframe = False
+fixed_bias_timeframe = "4h"
 
 trend_fast_span = 20
 trend_slow_span = 50
@@ -90,7 +104,7 @@ account_balance_fallback = 10000
 use_trailing = False
 trailing_atr_multiplier = 1.5
 atr_period = 14
-take_partial_rr = 1.5
+take_partial_rr = 0.0
 break_even_rr = 1.0
 backtest_min_hold_candles = 3
 max_backtest_candles_per_tf = 20000
@@ -98,7 +112,7 @@ max_backtest_candles_per_tf = 20000
 momentum_bias_override_score = 3
 ema_macd_bias_override_score = 3
 loss_streak_limit = 2
-loss_streak_risk_factor = 0.5
+loss_streak_risk_factor = 0.3
 
 user_config = read_user_config()
 environment_mode = user_config.get("environment", "paper")
@@ -143,6 +157,57 @@ try:
 except (TypeError, ValueError):
     pass
 
+config_trailing_flag = user_config.get("ema_macd_use_trailing")
+if isinstance(config_trailing_flag, bool):
+    ema_macd_use_trailing = config_trailing_flag
+
+config_trailing_rr = user_config.get("ema_macd_trailing_rr")
+try:
+    if config_trailing_rr is not None:
+        ema_macd_trailing_rr = max(0.1, float(config_trailing_rr))
+except (TypeError, ValueError):
+    pass
+
+config_trailing_activate = user_config.get("ema_macd_trailing_activate_rr")
+try:
+    if config_trailing_activate is not None:
+        ema_macd_trailing_activate_rr = max(0.0, float(config_trailing_activate))
+except (TypeError, ValueError):
+    pass
+
+config_momentum_trailing_flag = user_config.get("momentum_use_trailing")
+if isinstance(config_momentum_trailing_flag, bool):
+    momentum_use_trailing = config_momentum_trailing_flag
+
+config_momentum_trailing_rr = user_config.get("momentum_trailing_rr")
+try:
+    if config_momentum_trailing_rr is not None:
+        momentum_trailing_rr = max(0.1, float(config_momentum_trailing_rr))
+except (TypeError, ValueError):
+    pass
+
+config_momentum_trailing_activate = user_config.get("momentum_trailing_activate_rr")
+try:
+    if config_momentum_trailing_activate is not None:
+        momentum_trailing_activate_rr = max(0.0, float(config_momentum_trailing_activate))
+except (TypeError, ValueError):
+    pass
+
+config_take_partial = user_config.get("take_partial_rr")
+try:
+    if config_take_partial is not None:
+        take_partial_rr = max(0.0, float(config_take_partial))
+except (TypeError, ValueError):
+    pass
+
+config_fixed_bias_flag = user_config.get("use_fixed_bias_timeframe")
+if isinstance(config_fixed_bias_flag, bool):
+    use_fixed_bias_timeframe = config_fixed_bias_flag
+
+config_fixed_bias_tf = user_config.get("fixed_bias_timeframe")
+if isinstance(config_fixed_bias_tf, str) and config_fixed_bias_tf in timeframes:
+    fixed_bias_timeframe = config_fixed_bias_tf
+
 config_risk_percent = user_config.get("risk_percent")
 try:
     if config_risk_percent is not None:
@@ -178,6 +243,28 @@ config_multi_asset = user_config.get("multi_asset_enabled")
 if isinstance(config_multi_asset, bool):
     multi_asset_enabled = config_multi_asset
 
+config_momentum_require_div = user_config.get("momentum_require_divergence")
+if isinstance(config_momentum_require_div, bool):
+    momentum_require_divergence = config_momentum_require_div
+
+config_momentum_bonus = user_config.get("momentum_use_divergence_bonus")
+if isinstance(config_momentum_bonus, bool):
+    momentum_use_divergence_bonus = config_momentum_bonus
+
+config_momentum_rsi_long = user_config.get("momentum_rsi_long_max")
+try:
+    if config_momentum_rsi_long is not None:
+        momentum_rsi_long_max = float(config_momentum_rsi_long)
+except (TypeError, ValueError):
+    pass
+
+config_momentum_rsi_short = user_config.get("momentum_rsi_short_min")
+try:
+    if config_momentum_rsi_short is not None:
+        momentum_rsi_short_min = float(config_momentum_rsi_short)
+except (TypeError, ValueError):
+    pass
+
 exchange_class = getattr(ccxt, exchange_id)
 exchange = exchange_class({
     "apiKey": API_KEY,
@@ -209,6 +296,12 @@ def set_entry_timeframes(allowed: List[str] | None) -> None:
     entry_timeframes = unique if unique else list(timeframes)
 
 
+def get_bias_parent(tf: str) -> str | None:
+    if use_fixed_bias_timeframe and fixed_bias_timeframe in timeframes:
+        return fixed_bias_timeframe
+    return tf_bias_parent.get(tf)
+
+
 def update_environment_mode(mode: str) -> None:
     global environment_mode, paper
     if mode not in ("paper", "live"):
@@ -218,7 +311,7 @@ def update_environment_mode(mode: str) -> None:
 
 
 def override_from_cli(settings: Dict[str, object]) -> None:
-    global trade_bias, ema_macd_cross_lookback, ema_macd_require_divergence, strategy_mode, risk_percent, capital_base, risk_mode, leverage, active_pairs, multi_asset_enabled, divergence_min_drop_pct, ema_require_rsi_zone, ema_rsi_zone_long_max, ema_rsi_zone_short_min
+    global trade_bias, ema_macd_cross_lookback, ema_macd_require_divergence, strategy_mode, risk_percent, capital_base, risk_mode, leverage, active_pairs, multi_asset_enabled, divergence_min_drop_pct, ema_require_rsi_zone, ema_rsi_zone_long_max, ema_rsi_zone_short_min, ema_macd_use_trailing, ema_macd_trailing_rr, ema_macd_trailing_activate_rr, use_fixed_bias_timeframe, fixed_bias_timeframe, momentum_require_divergence, momentum_use_divergence_bonus, momentum_rsi_long_max, momentum_rsi_short_min, momentum_use_trailing, momentum_trailing_rr, momentum_trailing_activate_rr
     if "trade_bias" in settings and settings["trade_bias"] in ("long", "short", "both"):
         trade_bias = settings["trade_bias"]  # type: ignore[assignment]
     if "ema_cross_lookback" in settings and isinstance(settings["ema_cross_lookback"], int):
@@ -249,6 +342,65 @@ def override_from_cli(settings: Dict[str, object]) -> None:
             pass
         else:
             ema_rsi_zone_short_min = val  # type: ignore[assignment]
+    if "ema_macd_use_trailing" in settings and isinstance(settings["ema_macd_use_trailing"], bool):
+        ema_macd_use_trailing = settings["ema_macd_use_trailing"]  # type: ignore[assignment]
+    if "ema_macd_trailing_rr" in settings:
+        try:
+            val = float(settings["ema_macd_trailing_rr"])
+        except (TypeError, ValueError):
+            pass
+        else:
+            if val > 0:
+                ema_macd_trailing_rr = val  # type: ignore[assignment]
+    if "ema_macd_trailing_activate_rr" in settings:
+        try:
+            val = float(settings["ema_macd_trailing_activate_rr"])
+        except (TypeError, ValueError):
+            pass
+        else:
+            if val >= 0:
+                ema_macd_trailing_activate_rr = val  # type: ignore[assignment]
+    if "momentum_use_trailing" in settings and isinstance(settings["momentum_use_trailing"], bool):
+        momentum_use_trailing = settings["momentum_use_trailing"]  # type: ignore[assignment]
+    if "momentum_trailing_rr" in settings:
+        try:
+            val = float(settings["momentum_trailing_rr"])
+        except (TypeError, ValueError):
+            pass
+        else:
+            if val > 0:
+                momentum_trailing_rr = val  # type: ignore[assignment]
+    if "momentum_trailing_activate_rr" in settings:
+        try:
+            val = float(settings["momentum_trailing_activate_rr"])
+        except (TypeError, ValueError):
+            pass
+        else:
+            if val >= 0:
+                momentum_trailing_activate_rr = val  # type: ignore[assignment]
+    if "use_fixed_bias_timeframe" in settings and isinstance(settings["use_fixed_bias_timeframe"], bool):
+        use_fixed_bias_timeframe = settings["use_fixed_bias_timeframe"]  # type: ignore[assignment]
+    if "fixed_bias_timeframe" in settings and isinstance(settings["fixed_bias_timeframe"], str):
+        if settings["fixed_bias_timeframe"] in timeframes:
+            fixed_bias_timeframe = settings["fixed_bias_timeframe"]  # type: ignore[assignment]
+    if "momentum_require_divergence" in settings and isinstance(settings["momentum_require_divergence"], bool):
+        momentum_require_divergence = settings["momentum_require_divergence"]  # type: ignore[assignment]
+    if "momentum_use_divergence_bonus" in settings and isinstance(settings["momentum_use_divergence_bonus"], bool):
+        momentum_use_divergence_bonus = settings["momentum_use_divergence_bonus"]  # type: ignore[assignment]
+    if "momentum_rsi_long_max" in settings:
+        try:
+            val = float(settings["momentum_rsi_long_max"])
+        except (TypeError, ValueError):
+            pass
+        else:
+            momentum_rsi_long_max = val  # type: ignore[assignment]
+    if "momentum_rsi_short_min" in settings:
+        try:
+            val = float(settings["momentum_rsi_short_min"])
+        except (TypeError, ValueError):
+            pass
+        else:
+            momentum_rsi_short_min = val  # type: ignore[assignment]
     if "strategy_mode" in settings and settings["strategy_mode"] in ("momentum", "ema_macd"):
         strategy_mode = settings["strategy_mode"]  # type: ignore[assignment]
     if "risk_percent" in settings:

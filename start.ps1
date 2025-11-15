@@ -18,7 +18,17 @@ param(
     [double]$DivergenceMinDrop = 1.5,
     [switch]$RequireRsiZone,
     [double]$RsiZoneLongMax = 29.0,
-    [double]$RsiZoneShortMin = 70.0
+    [double]$RsiZoneShortMin = 70.0,
+    [switch]$MomentumRequireDivergence,
+    [switch]$MomentumAllowNoDivergence,
+    [switch]$MomentumDisableDivBonus,
+    [switch]$MomentumEnableDivBonus,
+    [double]$MomentumRsiLongMax = 60.0,
+    [double]$MomentumRsiShortMin = 40.0,
+    [switch]$EmaEnableTrailing,
+    [switch]$EmaDisableTrailing,
+    [double]$EmaTrailingRr = 1.0,
+    [double]$EmaTrailingActivate = 2.0
 )
 
 $pythonLauncher = "py -3.11"
@@ -93,5 +103,24 @@ if ($RequireRsiZone) {
 }
 $cmd += " --rsi-zone-long-max $RsiZoneLongMax"
 $cmd += " --rsi-zone-short-min $RsiZoneShortMin"
+if ($EmaEnableTrailing) {
+    $cmd += " --ema-enable-trailing"
+} elseif ($EmaDisableTrailing) {
+    $cmd += " --ema-disable-trailing"
+}
+$cmd += " --ema-trailing-rr $EmaTrailingRr"
+$cmd += " --ema-trailing-activate $EmaTrailingActivate"
+if ($MomentumRequireDivergence) {
+    $cmd += " --momentum-require-divergence"
+} elseif ($MomentumAllowNoDivergence) {
+    $cmd += " --momentum-allow-no-divergence"
+}
+if ($MomentumDisableDivBonus) {
+    $cmd += " --momentum-disable-divergence-bonus"
+} elseif ($MomentumEnableDivBonus) {
+    $cmd += " --momentum-enable-divergence-bonus"
+}
+$cmd += " --momentum-rsi-long-max $MomentumRsiLongMax"
+$cmd += " --momentum-rsi-short-min $MomentumRsiShortMin"
 Write-Host "Running: $cmd"
 Invoke-Expression $cmd
