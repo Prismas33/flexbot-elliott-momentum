@@ -117,7 +117,9 @@ Capturar impulsos de continuação da tendência com confluência de EMAs, volat
 
 ---
 
-## 3. Estratégia EMA + MACD
+## 3. Estratégia OMDs
+
+> Nota: OMDs era anteriormente chamada de estratégia EMA+MACD; a lógica permanece igual, apenas o nome exibido para o utilizador foi atualizado.
 
 ### Objetivo
 Entrar em movimentos em que tendência (EMAs) e momentum (MACD) estão alinhados, com confirmação adicional de RSI e ATR.
@@ -192,7 +194,7 @@ Entrar em movimentos em que tendência (EMAs) e momentum (MACD) estão alinhados
      - "range" (maioria `flat`).
    - Ajustar estratégias ao regime:
      - Elliott 2→3 e Momentum → mais ativos em regime de tendência.
-     - EMA+MACD com divergência → pode funcionar melhor em transições.
+    - OMDs com divergência → pode funcionar melhor em transições.
 
 5. **Uso sistemático do backtester**
    - Explorar diferentes combinações de parâmetros:
@@ -239,7 +241,7 @@ python .\elliott_momentum_breakout_bot.py --symbol "ETH/USDC:USDC" --timeframe 1
 | MOM-03      | ETH/USDC:USDC   | 15m  | 2.5             | 1.2               | 3.6             | 2                     |        |         |           |        | stop mais curto |
 | MOM-04      | ETH/USDC:USDC   | 15m  | 2.5             | 1.8               | 5.4             | 2                     |        |         |           |        | alvo mais longo |
 
-### 5.4. Tabela de Experiências – EMA + MACD
+### 5.4. Tabela de Experiências – OMDs
 
 | Experiência | Symbol          | TF   | min_rr_required | ema_macd_stop_atr | ema_macd_tp_atr | ema_macd_min_tf_agree | Trades | Winrate | P/L Total | Max DD | Observações |
 |-------------|-----------------|------|-----------------|-------------------|-----------------|-----------------------|--------|---------|-----------|--------|-------------|

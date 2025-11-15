@@ -1,4 +1,4 @@
-"""Helper for EMA+MACD strategy configuration."""
+"""Helper for OMDs strategy configuration."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ __all__ = ["ema_macd_confirm"]
 
 
 def ema_macd_confirm(df, cross_lookback: Optional[int] = None, require_divergence: Optional[bool] = None):
-    """Wrapper that applies context defaults before delegating to the long EMA+MACD confirmation."""
+    """Wrapper that applies context defaults before delegating to the long OMDs confirmation."""
     cross_lb = cross_lookback if cross_lookback is not None else ctx.ema_macd_cross_lookback
     divergence_required = ctx.ema_macd_require_divergence if require_divergence is None else require_divergence
     return ema_macd_confirm_long(

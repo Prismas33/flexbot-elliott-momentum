@@ -10,7 +10,7 @@ import pandas as pd
 
 from . import bias, context as ctx, data, divergence, indicators, state
 from .risk import get_risk_multiplier, register_trade_outcome
-from .strategies import momentum_confirm
+from .strategies import momentum_confirm_long, momentum_confirm_short
 from .strategies.ema_macd import ema_macd_confirm
 from .strategies.ema_macd_short import ema_macd_confirm_short
 
@@ -198,52 +198,88 @@ def backtest_pair(symbol: str, timeframe: str, lookback_days: int = 90, strategy
         selected_trade = None
 
         if strategy == "momentum":
-            if effective_bias == "short":
-                i += 1
-                continue
-            momentum_ready = []
+            candidates = []
+            long_ready = []
+            short_ready = []
             for tf in active_timeframes:
                 slice_df = slices.get(tf)
                 if slice_df is None or len(slice_df) < 50:
                     continue
                 bias_dir = bias_snapshot.get(tf, "both")
-                has_div = has_bullish_rsi_divergence(slice_df)
-                confirmed, details = momentum_confirm(slice_df)
-                if not confirmed or not details.get("atr"):
-                    continue
-                if has_div:
-                    details["score"] = details.get("score", 0) + 0.5
-                if bias_dir == "down" and details.get("score", 0) < ctx.momentum_bias_override_score:
-                    continue
-                momentum_ready.append((tf, details))
-            required = max(1, min(ctx.momentum_min_tf_agree, len(momentum_ready)))
-            if len(momentum_ready) < required:
+                if effective_bias in ("long", "both"):
+                    has_div_long = has_bullish_rsi_divergence(slice_df)
+                    confirmed_long, details_long = momentum_confirm_long(slice_df)
+                    if confirmed_long and has_div_long:
+                        details_long["score"] = details_long.get("score", 0) + 1.0
+                    if confirmed_long and bias_dir == "down" and details_long.get("score", 0) < ctx.momentum_bias_override_score:
+                        confirmed_long = False
+                    if confirmed_long and details_long.get("atr"):
+                        long_ready.append((tf, details_long, bias_dir))
+                if effective_bias in ("short", "both"):
+                    has_div_short = has_bearish_rsi_divergence(slice_df)
+                    confirmed_short, details_short = momentum_confirm_short(slice_df)
+                    if confirmed_short and has_div_short:
+                        details_short["score"] = details_short.get("score", 0) + 1.0
+                    if confirmed_short and bias_dir == "up" and details_short.get("score", 0) < ctx.momentum_bias_override_score:
+                        confirmed_short = False
+                    if confirmed_short and details_short.get("atr"):
+                        short_ready.append((tf, details_short, bias_dir))
+
+            if long_ready:
+                required_long = max(1, min(ctx.momentum_min_tf_agree, len(long_ready)))
+                if len(long_ready) >= required_long:
+                    long_ready.sort(key=lambda item: item[1].get("score", 0), reverse=True)
+                    ref_tf, detail_long, _ = long_ready[0]
+                    entry_price = detail_long.get("last_close")
+                    atr_val = detail_long.get("atr")
+                    if entry_price is not None and atr_val not in (None, 0):
+                        stop_price = entry_price - atr_val * ctx.momentum_stop_atr
+                        tp_price = entry_price + atr_val * ctx.momentum_tp_atr
+                        rr_val = state.compute_rr(entry_price, stop_price, tp_price, side='buy')
+                        if rr_val is not None and rr_val >= ctx.min_rr_required:
+                            candidates.append({
+                                "tf": ref_tf,
+                                "entry_price": entry_price,
+                                "stop_price": stop_price,
+                                "tp_price": tp_price,
+                                "rr": rr_val,
+                                "side": "buy",
+                                "risk_key": "momentum_long",
+                                "direction": "long",
+                                "details": detail_long,
+                                "score": detail_long.get("score", 0),
+                            })
+
+            if short_ready:
+                required_short = max(1, min(ctx.momentum_min_tf_agree, len(short_ready)))
+                if len(short_ready) >= required_short:
+                    short_ready.sort(key=lambda item: item[1].get("score", 0), reverse=True)
+                    ref_tf, detail_short, _ = short_ready[0]
+                    entry_price = detail_short.get("last_close")
+                    atr_val = detail_short.get("atr")
+                    if entry_price is not None and atr_val not in (None, 0):
+                        stop_price = entry_price + atr_val * ctx.momentum_stop_atr
+                        tp_price = entry_price - atr_val * ctx.momentum_tp_atr
+                        rr_val = state.compute_rr(entry_price, stop_price, tp_price, side='sell')
+                        if rr_val is not None and rr_val >= ctx.min_rr_required:
+                            candidates.append({
+                                "tf": ref_tf,
+                                "entry_price": entry_price,
+                                "stop_price": stop_price,
+                                "tp_price": tp_price,
+                                "rr": rr_val,
+                                "side": "sell",
+                                "risk_key": "momentum_short",
+                                "direction": "short",
+                                "details": detail_short,
+                                "score": detail_short.get("score", 0),
+                            })
+
+            if not candidates:
                 i += 1
                 continue
-            momentum_ready.sort(key=lambda item: item[1].get("score", 0), reverse=True)
-            ref_tf, detail = momentum_ready[0]
-            entry_price = detail.get("last_close")
-            atr_val = detail.get("atr")
-            if entry_price is None or atr_val in (None, 0):
-                i += 1
-                continue
-            stop_price = entry_price - atr_val * ctx.momentum_stop_atr
-            tp_price = entry_price + atr_val * ctx.momentum_tp_atr
-            rr = state.compute_rr(entry_price, stop_price, tp_price, side='buy')
-            if rr is None or rr < ctx.min_rr_required:
-                i += 1
-                continue
-            selected_trade = {
-                "tf": ref_tf,
-                "entry_price": entry_price,
-                "stop_price": stop_price,
-                "tp_price": tp_price,
-                "rr": rr,
-                "side": "buy",
-                "risk_key": "momentum_long",
-                "direction": "long",
-                "details": detail,
-            }
+            candidates.sort(key=lambda c: (c.get("score", 0), c.get("rr", 0)), reverse=True)
+            selected_trade = candidates[0]
         elif strategy == "ema_macd":
             candidates = []
             if effective_bias in ("long", "both"):
@@ -304,7 +340,7 @@ def backtest_pair(symbol: str, timeframe: str, lookback_days: int = 90, strategy
                     )
                     if not confirmed_short and logging.getLogger().isEnabledFor(logging.DEBUG):
                         logging.debug(
-                            "EMA+MACD short rejeitado (bt) %s %s @ %s — detalhes: %s",
+                            "OMDs short rejeitado (bt) %s %s @ %s — detalhes: %s",
                             symbol,
                             tf,
                             ts,

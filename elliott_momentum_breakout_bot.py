@@ -1,7 +1,7 @@
 """
 elliott_momentum_breakout_bot.py
 
-Sistema Momentum / EMA+MACD Breakout
+Sistema Momentum / OMDs Breakout
 - Multi-par (ETH/BTC/SOL) + Multi-timeframe (5m,15m,1h)
 - SL/TP automáticos, trailing stop opcional, position sizing por risco
 - Backtester simples para simular sinais e métricas
@@ -51,7 +51,7 @@ if __name__ == "__main__":
     paper_group.add_argument('--paper-mode', dest='paper', action='store_const', const=True, help='Força modo paper (test) mesmo se o config estiver em live')
     paper_group.add_argument('--no-paper', dest='paper', action='store_const', const=False, help='Disable paper mode (will execute real orders)')
     parser.add_argument('--strategy', choices=['momentum','ema_macd'], default=ctx.strategy_mode, help='Seleciona estratégia principal')
-    parser.add_argument('--cross-lookback', dest='cross_lookback', type=int, default=ctx.ema_macd_cross_lookback, help='Janela (nº de velas) para aceitar cruzamentos EMA/MACD recentes')
+    parser.add_argument('--cross-lookback', dest='cross_lookback', type=int, default=ctx.ema_macd_cross_lookback, help='Janela (nº de velas) para aceitar cruzamentos OMDs recentes')
     parser.add_argument('--trade-bias', choices=['long','short','both'], default=ctx.trade_bias, help='Direção de trade: only long, only short ou ambos')
     parser.add_argument('--risk-percent', dest='risk_percent', type=float, help='Percentual do capital alocado a arriscar por trade (ex.: 1.0 para 1%).')
     parser.add_argument('--capital-base', dest='capital_base', type=float, help='Capital base máximo para cálculo de risco (padrão segue config).')
@@ -59,8 +59,8 @@ if __name__ == "__main__":
     parser.add_argument('--leverage', dest='leverage', type=float, help='Alavancagem alvo para limitar o tamanho máximo da posição.')
     parser.add_argument('--log-level', dest='log_level', default='INFO', help='Nível de logging (DEBUG, INFO, WARNING, ...)')
     divergence_group = parser.add_mutually_exclusive_group()
-    divergence_group.add_argument('--require-divergence', dest='require_divergence', action='store_true', default=ctx.ema_macd_require_divergence, help='Exige divergência RSI para setups EMA+MACD (padrão)')
-    divergence_group.add_argument('--allow-no-divergence', dest='require_divergence', action='store_false', help='Permite setups EMA+MACD mesmo sem divergência RSI')
+    divergence_group.add_argument('--require-divergence', dest='require_divergence', action='store_true', default=ctx.ema_macd_require_divergence, help='Exige divergência RSI para setups OMDs (padrão)')
+    divergence_group.add_argument('--allow-no-divergence', dest='require_divergence', action='store_false', help='Permite setups OMDs mesmo sem divergência RSI')
     parser.add_argument('--check-symbol', dest='check_symbol', help='Valida se o par existe na corretora e termina imediatamente')
     parser.add_argument('--all-pairs', dest='all_pairs', action='store_true', help='Loop live cobre todos os pares configurados (ignora --symbol)')
     parser.set_defaults(paper=None)
@@ -113,8 +113,9 @@ if __name__ == "__main__":
 
     logging.info("Estratégia ativa: %s", ctx.strategy_mode)
     logging.info("Bias de trade ativo: %s", ctx.trade_bias)
-    logging.info("EMA/MACD cross lookback: %d velas", ctx.ema_macd_cross_lookback)
-    logging.info("EMA/MACD exige divergência RSI: %s", "sim" if ctx.ema_macd_require_divergence else "não")
+    if ctx.strategy_mode == "ema_macd":
+        logging.info("OMDs cross lookback: %d velas", ctx.ema_macd_cross_lookback)
+        logging.info("OMDs exige divergência RSI: %s", "sim" if ctx.ema_macd_require_divergence else "não")
     logging.info("Modo de risco: %s", ctx.risk_mode)
     logging.info("Risco por trade: %.2f%%", ctx.risk_percent * 100)
     logging.info("Capital base para sizing: %.2f", ctx.capital_base)
@@ -133,6 +134,7 @@ if __name__ == "__main__":
         leverage=ctx.leverage,
         active_pairs=list(ctx.active_pairs),
         multi_asset_enabled=getattr(ctx, "multi_asset_enabled", True),
+        strategy_mode=ctx.strategy_mode,
     )
 
     if args.live:
@@ -179,6 +181,7 @@ if __name__ == "__main__":
                     "ema_cross_lookback": ctx.ema_macd_cross_lookback,
                     "ema_require_divergence": ctx.ema_macd_require_divergence,
                     "trade_bias": ctx.trade_bias,
+                    "strategy_mode": ctx.strategy_mode,
                     "environment": ctx.environment_mode,
                 }
             )

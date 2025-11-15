@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import json
+import textwrap
 import os
 import signal
 import subprocess
@@ -307,9 +310,22 @@ with st.sidebar:
     default_tf_index = available_timeframes.index(default_timeframe) if isinstance(default_timeframe, str) and default_timeframe in available_timeframes else 1 if len(available_timeframes) > 1 else 0
     timeframe = st.selectbox("Timeframe", options=available_timeframes, index=default_tf_index)
     lookback_days = st.slider("Lookback (dias)", min_value=30, max_value=180, value=60, step=5)
-    strategy = "ema_macd"
-    strategy_display = "EMA + MACD"
-    st.selectbox("Estratégia", options=[strategy_display], index=0, disabled=True)
+    strategy_labels = {
+        "momentum": "Momentum",
+        "ema_macd": "OMDs",
+    }
+    configured_strategy = config_data.get("strategy_mode", ctx.strategy_mode)
+    if configured_strategy not in strategy_labels:
+        configured_strategy = ctx.strategy_mode if ctx.strategy_mode in strategy_labels else "momentum"
+    strategy_options = list(strategy_labels.keys())
+    strategy_idx = strategy_options.index(configured_strategy)
+    strategy = st.selectbox(
+        "Estratégia",
+        options=strategy_options,
+        index=strategy_idx,
+        format_func=lambda key: strategy_labels.get(key, key),
+    )
+    strategy_display = strategy_labels.get(strategy, strategy)
     bias_label = {
         "long": "Comprado",
         "short": "Vendido",
@@ -389,15 +405,20 @@ with st.sidebar:
     default_cross = config_data.get("ema_cross_lookback", 8)
     if not isinstance(default_cross, int) or default_cross < 2 or default_cross > 30:
         default_cross = 8
-    cross_lookback = st.slider("Velas para cruzamento EMA/MACD", min_value=2, max_value=30, value=default_cross, step=1)
     require_default = config_data.get("ema_require_divergence")
     if not isinstance(require_default, bool):
         require_default = True
-    require_divergence = st.checkbox(
-        "Exigir divergência RSI (EMA+MACD)",
-        value=require_default,
-        help="Quando desmarcado, a confirmação EMA+MACD aceita sinais sem divergência RSI.",
-    )
+    if strategy == "ema_macd":
+        cross_lookback = st.slider("Velas para cruzamento OMDs", min_value=2, max_value=30, value=default_cross, step=1)
+        require_divergence = st.checkbox(
+            "Exigir divergência RSI (OMDs)",
+            value=require_default,
+            help="Quando desmarcado, a confirmação OMDs aceita sinais sem divergência RSI.",
+        )
+    else:
+        cross_lookback = default_cross
+        require_divergence = require_default
+        st.caption("Parâmetros de cruzamento/divergência aplicam-se apenas à estratégia OMDs.")
     if (
         config_data.get("symbol") != symbol
         or config_data.get("timeframe") != timeframe
@@ -408,6 +429,7 @@ with st.sidebar:
         or abs(configured_risk_percent - risk_percent_value) > 1e-9
         or abs(configured_capital_base - capital_base_value) > 1e-9
         or abs(configured_leverage - leverage_value) > 1e-9
+        or config_data.get("strategy_mode") != strategy
         or set(config_data.get("active_pairs", [])) != set(active_pairs)
         or config_data.get("multi_asset_enabled") != multi_asset_enabled
     ):
@@ -417,6 +439,7 @@ with st.sidebar:
             trade_bias=trade_bias,
             ema_cross_lookback=cross_lookback,
             ema_require_divergence=require_divergence,
+            strategy_mode=strategy,
             risk_mode=risk_mode_choice,
             risk_percent=risk_percent_value,
             capital_base=capital_base_value,
@@ -425,6 +448,7 @@ with st.sidebar:
             multi_asset_enabled=multi_asset_enabled,
         )
 
+    ctx.strategy_mode = strategy
     ctx.set_multi_asset_enabled(multi_asset_enabled)
     ctx.set_active_pairs(active_pairs)
     if "pair_validation" not in st.session_state:
@@ -460,22 +484,36 @@ if multi_asset_enabled:
 else:
     assets_badge_label = symbol
     assets_badge_title = "Ativo"
-summary_html = f"""
-<div class='hero-card'>
-    <div>
-        <div class='hero-title'>{symbol}</div>
-        <div class='hero-meta'>{timeframe} · Lookback {lookback_days} dias · Cross {cross_lookback} velas</div>
+meta_parts = [
+    timeframe,
+    f"Lookback {lookback_days} dias",
+]
+if strategy == "ema_macd":
+    meta_parts.append(f"Cross {cross_lookback} velas")
+badge_spans = [
+    f"<span class='status-pill {env_choice}'>{env_labels.get(env_choice, env_choice.title())}</span>",
+    f"<span class='status-pill slim'>{strategy_display}</span>",
+    f"<span class='status-pill slim'>Bias {bias_label.get(trade_bias, trade_bias)}</span>",
+    f"<span class='status-pill slim'>{risk_badge_label}</span>",
+    f"<span class='status-pill slim'>{assets_badge_title} {assets_badge_label}</span>",
+    f"<span class='status-pill slim'>{leverage_badge_label}</span>",
+]
+if strategy == "ema_macd":
+    badge_spans.insert(2, f"<span class='status-pill slim'>Divergência {divergence_badge}</span>")
+badges_html = "\n            ".join(badge_spans)
+summary_html = textwrap.dedent(
+    f"""
+    <div class='hero-card'>
+        <div>
+            <div class='hero-title'>{symbol}</div>
+            <div class='hero-meta'>{' · '.join(meta_parts)}</div>
+        </div>
+        <div class='hero-badges'>
+            {badges_html}
+        </div>
     </div>
-    <div class='hero-badges'>
-        <span class='status-pill {env_choice}'>{env_labels.get(env_choice, env_choice.title())}</span>
-        <span class='status-pill slim'>Divergência {divergence_badge}</span>
-        <span class='status-pill slim'>Bias {bias_label.get(trade_bias, trade_bias)}</span>
-        <span class='status-pill slim'>{risk_badge_label}</span>
-        <span class='status-pill slim'>{assets_badge_title} {assets_badge_label}</span>
-        <span class='status-pill slim'>{leverage_badge_label}</span>
-    </div>
-</div>
-"""
+    """
+)
 st.markdown(summary_html, unsafe_allow_html=True)
 
 control_state = read_control_state()
@@ -622,7 +660,7 @@ if loop_feedback:
 st.markdown("</div>", unsafe_allow_html=True)
 
 @st.cache_data(show_spinner=False)
-def run_backtest(symbol: str, timeframe: str, lookback_days: int, strategy: str, bias: str, cross_lookback: int, require_divergence: bool):
+def run_backtest(symbol: str, timeframe: str, lookback_days: int, strategy: str, bias: str, cross_lookback: int | None, require_divergence: bool | None):
     df_trades, coverage = backtest_pair(
         symbol,
         timeframe,
@@ -645,9 +683,20 @@ backtest_tab, realtime_tab = st.tabs(["Backtest", "Tempo real"])
 with backtest_tab:
     if run_button:
         with st.spinner(
-            f"Gerando backtest {symbol} {timeframe} (últimos {lookback_days} dias) — estratégia {strategy_display} | bias {bias_label.get(trade_bias, trade_bias)} | cross {cross_lookback} velas | divergência {'obrigatória' if require_divergence else 'opcional'}..."
+            f"Gerando backtest {symbol} {timeframe} (últimos {lookback_days} dias) — estratégia {strategy_display} | bias {bias_label.get(trade_bias, trade_bias)}"
+            + (f" | cross {cross_lookback} velas" if strategy == "ema_macd" else "")
+            + (" | divergência " + ("obrigatória" if require_divergence else "opcional") if strategy == "ema_macd" else "")
+            + "..."
         ):
-            df, coverage = run_backtest(symbol, timeframe, lookback_days, strategy, trade_bias, cross_lookback, require_divergence)
+                df, coverage = run_backtest(
+                    symbol,
+                    timeframe,
+                    lookback_days,
+                    strategy,
+                    trade_bias,
+                    cross_lookback if strategy == "ema_macd" else None,
+                    require_divergence if strategy == "ema_macd" else None,
+                )
         if df is None or df.empty:
             st.warning("Nenhuma operação encontrada para os parâmetros escolhidos.")
         else:
@@ -674,9 +723,21 @@ with backtest_tab:
                 for label, value, context in cards
             )
             st.markdown(f"<div class='metric-grid'>{cards_html}</div>", unsafe_allow_html=True)
-            st.caption(
-                f"Simulação: capital inicial ${ctx.simulation_base_capital:.0f} | risco {ctx.simulation_risk_per_trade*100:.0f}% por trade | estratégia {strategy_display} | bias {bias_label.get(trade_bias, trade_bias)} | cross lookback {cross_lookback} velas | divergência {'obrigatória' if require_divergence else 'opcional'} | vitórias {len(wins)} | derrotas {len(losses)} | breakeven {len(breakevens)}"
-            )
+            caption_parts = [
+                f"Simulação: capital inicial ${ctx.simulation_base_capital:.0f}",
+                f"risco {ctx.simulation_risk_per_trade*100:.0f}% por trade",
+                f"estratégia {strategy_display}",
+                f"bias {bias_label.get(trade_bias, trade_bias)}",
+            ]
+            if strategy == "ema_macd":
+                caption_parts.append(f"cross lookback {cross_lookback} velas")
+                caption_parts.append(f"divergência {'obrigatória' if require_divergence else 'opcional'}")
+            caption_parts.extend([
+                f"vitórias {len(wins)}",
+                f"derrotas {len(losses)}",
+                f"breakeven {len(breakevens)}",
+            ])
+            st.caption(" | ".join(caption_parts))
 
             st.subheader("Evolução do PnL cumulativo")
             st.markdown("<div class='card-section'>", unsafe_allow_html=True)

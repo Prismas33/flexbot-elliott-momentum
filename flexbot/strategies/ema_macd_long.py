@@ -1,4 +1,4 @@
-"""EMA+MACD long-side confirmation logic."""
+"""OMDs long-side confirmation logic."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def ema_macd_confirm_long(
     cross_lookback: int = 8,
     require_divergence: bool = True,
 ):
-    """Confirma setup de compra para EMA + MACD."""
+    """Confirma setup de compra para OMDs."""
     if df is None or len(df) < max(ema_slow_period, ema_macd_slow) + 5:
         return False, {}
 

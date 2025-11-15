@@ -28,7 +28,7 @@ has_bearish_rsi_divergence = divergence.has_bearish_rsi_divergence
 
 
 def analyze_ema_macd_and_maybe_trade(symbol: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    """Run EMA+MACD confirmation stack for a single symbol and maybe open a trade."""
+    """Run the OMDs confirmation stack for a single symbol and maybe open a trade."""
     summary: Dict[str, Any] = {
         "symbol": symbol,
         "status": "ok",
@@ -92,7 +92,7 @@ def analyze_ema_macd_and_maybe_trade(symbol: str) -> Tuple[Optional[Dict[str, An
             )
             if not confirmed_short and logging.getLogger().isEnabledFor(logging.DEBUG):
                 logging.debug(
-                    "EMA+MACD short rejeitado (live) %s %s — detalhes: %s",
+                    "OMDs short rejeitado (live) %s %s — detalhes: %s",
                     symbol,
                     tf,
                     details_short,
